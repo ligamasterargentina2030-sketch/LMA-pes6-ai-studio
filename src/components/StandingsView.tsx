@@ -109,10 +109,11 @@ export function StandingsView({
       if (newCrestFile) {
         form.append('crest', newCrestFile);
       }
-      const data = await apiFetch<{ team: PublicTeam & { clave?: string } }>('/api/admin/teams', {
+      const data = await apiFetch<{ team: PublicTeam; generatedClave?: string }>('/api/admin/teams', {
         method: 'POST',
         body: form,
       });
+      const assignedPass = data?.generatedClave || newClave.trim();
       setNewTeamName('');
       setNewMemberName('');
       setNewCrestFile(null);
@@ -122,8 +123,8 @@ export function StandingsView({
       setFormMsg({
         type: 'ok',
         text: created
-          ? `Miembro "${created.memberName}" (${created.name} · ID: ${created.id}${created.clave ? ` / Clave: ${created.clave}` : ''}) agregado y publicado en la Tabla de Posiciones.`
-          : 'Equipo y miembro agregados y publicados en la Tabla de Posiciones.',
+          ? `Participante "${created.memberName}" (${created.name} · ID: ${created.id}${assignedPass ? ` · Contraseña inicial: ${assignedPass}` : ''}) creado y publicado en la Tabla de Posiciones.`
+          : 'Equipo y participante agregados y publicados en la Tabla de Posiciones.',
       });
     } catch (err) {
       setFormMsg({

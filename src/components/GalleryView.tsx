@@ -16,10 +16,15 @@ import {
   deleteDoc,
   doc,
   serverTimestamp,
-} from 'firebase/firestore';
+} from 'firebase/firestore/lite';
 import defaultChampImg from '../assets/images/champion_celebration_default_1794642902876.jpg';
 import { resolveAssetUrl } from '../utils/assetUrl';
-import { db, formatFirestoreError, OperationType } from '../firebase';
+import {
+  db,
+  formatFirestoreError,
+  notifyCommunityVideosChanged,
+  OperationType,
+} from '../firebase';
 import type { AuthUser, ChampionEntry, CommunityVideo, GalleryVideo } from '../types';
 import { apiFetch } from '../utils/api';
 import { ResilientImage } from './ResilientImage';
@@ -250,10 +255,11 @@ export function GalleryView({
         videoUrl: uploadedVideoUrl,
         fecha: serverTimestamp(),
       });
+      notifyCommunityVideosChanged();
       setTitulo('');
       setUploadedVideoUrl('');
       setUploadedFileName('');
-      setVideoSuccess('¡Video publicado! Ya está disponible en tiempo real para toda la comunidad.');
+      setVideoSuccess('¡Video publicado! Ya está disponible para toda la comunidad.');
       window.setTimeout(() => setVideoSuccess(null), 5000);
     } catch (err) {
       setVideoError(formatFirestoreError(err, OperationType.CREATE, 'videos_comunidad'));
@@ -291,6 +297,7 @@ export function GalleryView({
   const handleDeleteCommunityVideo = async (id: string) => {
     try {
       await deleteDoc(doc(db, 'videos_comunidad', id));
+      notifyCommunityVideosChanged();
       if (featuredVideoId === id) {
         await apiFetch('/api/admin/featured-video', { method: 'DELETE' }).catch(() => undefined);
         await onRefresh();

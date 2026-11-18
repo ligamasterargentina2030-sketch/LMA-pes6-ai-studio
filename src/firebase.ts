@@ -1,5 +1,5 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore/lite';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBkcALIEgL4u2i8w_GIX-NlXROkJgiTc0w",
@@ -15,7 +15,16 @@ const firebaseConfig = {
 const app = getApps().some((a) => a.name === '[DEFAULT]')
   ? getApp()
   : initializeApp(firebaseConfig);
+
 export const db = getFirestore(app);
+
+export const COMMUNITY_VIDEOS_REFRESH_EVENT = 'lma-community-videos-refresh';
+
+export function notifyCommunityVideosChanged(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(COMMUNITY_VIDEOS_REFRESH_EVENT));
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -37,14 +46,4 @@ export function formatFirestoreError(
     return 'Firestore rechazó la operación por permisos. Revisá las reglas de seguridad de la colección videos_comunidad en Firebase.';
   }
   return `Error de Firebase Firestore (${operationType}): ${rawMessage}`;
-}
-
-export async function testFirestoreConnection(): Promise<void> {
-  try {
-    await getDocFromServer(doc(db, 'videos_comunidad', '_connection_check'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Firebase Firestore offline. Verificá tu conexión o configuración.');
-    }
-  }
 }

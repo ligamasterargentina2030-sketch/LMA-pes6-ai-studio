@@ -6,16 +6,18 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  Copy,
   Crown,
   Disc3,
   Edit3,
   Eye,
-  EyeOff,
   Film,
   Flame,
   Heart,
+  History,
   Image as ImageIcon,
   KeyRound,
+  Lock,
   LogOut,
   Mail,
   Megaphone,
@@ -33,17 +35,19 @@ import {
   Star,
   Trash2,
   Trophy,
+  Unlock,
   Upload,
   Users,
   X,
 } from 'lucide-react';
-import { deleteDoc, doc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { deleteDoc, doc } from 'firebase/firestore/lite';
+import { db, notifyCommunityVideosChanged } from '../firebase';
 import type {
   AuthUser,
   ChampionEntry,
   Claim,
   CommunityVideo,
+  CredentialAuditEntry,
   CupRulesSettings,
   CupTournament,
   GalleryVideo,
@@ -61,7 +65,7 @@ import type {
   Team,
   TopGoalItem,
 } from '../types';
-import { apiFetch } from '../utils/api';
+import { apiFetch, setStoredToken } from '../utils/api';
 import { resolveAssetUrl } from '../utils/assetUrl';
 import {
   deletePersonalLocalTrack,
@@ -108,7 +112,7 @@ interface ProfileViewProps {
   news?: NewsPost[];
   comments?: LeagueComment[];
   likedTeams?: Record<string, boolean>;
-  ownClave?: string;
+  credentialAuditLog?: CredentialAuditEntry[];
   initialAdminTab?: AdminSection;
   onOpenAuth: () => void;
   onLogout: () => void;
@@ -160,7 +164,7 @@ export function ProfileView({
   news = [],
   comments = [],
   likedTeams = {},
-  ownClave,
+  credentialAuditLog = [],
   initialAdminTab,
   onOpenAuth,
   onLogout,
@@ -172,7 +176,18 @@ export function ProfileView({
   const [adminTab, setAdminTab] = useState<AdminSection>(initialAdminTab || 'equipos');
   const [participantsSearch, setParticipantsSearch] = useState('');
   const [likingTeamId, setLikingTeamId] = useState<string | null>(null);
-  const [showOwnClave, setShowOwnClave] = useState(false);
+  const [teamStatusFilter, setTeamStatusFilter] = useState<'all' | 'active' | 'blocked'>('all');
+  const [oneTimeCredentialBanner, setOneTimeCredentialBanner] = useState<{
+    title: string;
+    id: string;
+    memberName: string;
+    teamName: string;
+    password: string;
+  } | null>(null);
+  const [copiedCredentialId, setCopiedCredentialId] = useState<string | null>(null);
+  const [confirmDeleteTeamId, setConfirmDeleteTeamId] = useState<string | null>(null);
+  const [statusBusyTeamId, setStatusBusyTeamId] = useState<string | null>(null);
+  const [resetBusyTeamId, setResetBusyTeamId] = useState<string | null>(null);
 
   // Admin: Noticias y Comunicados state
   const [editingNewsId, setEditingNewsId] = useState<string | null>(null);
@@ -241,6 +256,10 @@ export function ProfileView({
   const myStanding = standings.find((s) => s.team.id === myTeam?.id);
   const [bio, setBio] = useState(myTeam?.bio || '');
   const [bioSaved, setBioSaved] = useState(false);
+
+  useEffect(() => {
+    setBio(myTeam?.bio || '');
+  }, [myTeam?.id, myTeam?.bio]);
 
   // Celebration photo for own profile
   const [celebFile, setCelebFile] = useState<File | null>(null);
@@ -411,7 +430,11 @@ export function ProfileView({
   const [siteDescription, setSiteDescription] = useState(settings.description || '');
   const [siteBanner, setSiteBanner] = useState(settings.bannerText);
   const [adminLoginId, setAdminLoginId] = useState(settings.adminId);
-  const [adminLoginClave, setAdminLoginClave] = useState('');
+  const [adminCurrentPassword, setAdminCurrentPassword] = useState('');
+  const [adminNewPassword, setAdminNewPassword] = useState('');
+  const [adminConfirmPassword, setAdminConfirmPassword] = useState('');
+  const [savingAdminCredentials, setSavingAdminCredentials] = useState(false);
+  const [adminCredMsg, setAdminCredMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [backupGmail, setBackupGmail] = useState(settings.backupGmail || '');
   const [radioName, setRadioName] = useState(
     settings.radioName || 'FM 101.5 Pop Radio (Bs. As.)'
@@ -614,6 +637,8 @@ export function ProfileView({
       ? rejectedMatches
       : matches;
   const filteredAdminTeams = adminTeams.filter((t) => {
+    const status = t.accountStatus || 'active';
+    if (teamStatusFilter !== 'all' && status !== teamStatusFilter) return false;
     const q = teamSearch.trim().toLowerCase();
     if (!q) return true;
     return (
@@ -800,16 +825,18 @@ export function ProfileView({
           </div>
           <h1 className="font-display text-3xl font-extrabold text-albiceleste-shiny">Mi Perfil</h1>
           <p className="text-sm text-sky-100/90">
-            Iniciá sesión con el <strong className="text-amber-200">ID</strong> y la{' '}
-            <strong className="text-amber-200">Clave</strong> de tu equipo (o como Administrador) para editar tu lema, subir resultados o administrar la liga.
+            Iniciá sesión con el <strong className="text-amber-200">ID de usuario</strong> y la{' '}
+            <strong className="text-amber-200">Contraseña</strong> asignados por el Administrador para acceder a tu cuenta o administrar la liga.
           </p>
-          <button
-            type="button"
-            onClick={onOpenAuth}
-            className="px-6 py-3 text-sm font-semibold btn-gold-luxury rounded-xl transition-all"
-          >
-            Ingresar con ID y Clave
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="px-6 py-3 text-sm font-semibold btn-gold-luxury rounded-xl transition-all"
+            >
+              Ingresar con ID y Clave
+            </button>
+          </div>
         </div>
 
         {renderParticipantsDirectory()}
@@ -860,21 +887,37 @@ export function ProfileView({
     }
   };
 
+  const handleCopyCredentials = async (id: string, password: string) => {
+    const text = `ID de usuario: ${id} | Contraseña: ${password}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedCredentialId(id);
+      window.setTimeout(() => setCopiedCredentialId(null), 2500);
+    } catch {
+      // Clipboard may be unavailable in restricted contexts
+    }
+  };
+
   const handleCreateTeam = async (e: FormEvent) => {
     e.preventDefault();
     setTeamMsg(null);
     setSavingTeam(true);
     try {
+      const manualPassword = newTeamClave.trim();
       const form = new FormData();
       form.append('id', newTeamId.trim());
-      form.append('clave', newTeamClave.trim());
+      form.append('clave', manualPassword);
       form.append('name', newTeamName.trim());
       form.append('memberName', newMemberName.trim());
       form.append('bio', newTeamBio.trim());
       if (newCrestFile) {
         form.append('crest', newCrestFile);
       }
-      const data = await apiFetch<{ team: Team }>('/api/admin/teams', { method: 'POST', body: form });
+      const data = await apiFetch<{ team: Team; generatedClave?: string }>('/api/admin/teams', {
+        method: 'POST',
+        body: form,
+      });
+      const assignedPassword = data?.generatedClave || manualPassword;
       setNewTeamId('');
       setNewTeamClave('');
       setNewTeamName('');
@@ -884,16 +927,25 @@ export function ProfileView({
       if (newCrestInputRef.current) newCrestInputRef.current.value = '';
       await onRefresh();
       const created = data?.team;
+      if (created && assignedPassword) {
+        setOneTimeCredentialBanner({
+          title: 'Participante creado · Credenciales iniciales listas para entregar',
+          id: created.id,
+          memberName: created.memberName,
+          teamName: created.name,
+          password: assignedPassword,
+        });
+      }
       setTeamMsg({
         type: 'ok',
         text: created
-          ? `Miembro "${created.memberName}" (${created.name} · ID: ${created.id} / Clave: ${created.clave}) creado y agregado automáticamente a la Tabla de Posiciones.`
-          : 'Miembro y equipo creados y agregados automáticamente en la Tabla de Posiciones.',
+          ? `Participante "${created.memberName}" (${created.name} · ID: ${created.id}) creado con contraseña cifrada y publicado en la Tabla de Posiciones.`
+          : 'Participante y equipo creados y publicados en la Tabla de Posiciones.',
       });
     } catch (err) {
       setTeamMsg({
         type: 'err',
-        text: err instanceof Error ? err.message : 'No se pudo agregar el equipo.',
+        text: err instanceof Error ? err.message : 'No se pudo agregar el participante.',
       });
     } finally {
       setSavingTeam(false);
@@ -907,7 +959,7 @@ export function ProfileView({
     }
     setEditingTeam(team);
     setEditId(team.id);
-    setEditClave(team.clave);
+    setEditClave('');
     setEditName(team.name);
     setEditMember(team.memberName);
     setEditBio(team.bio || '');
@@ -920,38 +972,133 @@ export function ProfileView({
     setTeamMsg(null);
     setSavingEditTeam(true);
     try {
+      const nextNewPass = editClave.trim();
       const form = new FormData();
-      form.append('id', editId.trim());
-      form.append('clave', editClave.trim());
+      form.append('id', editId.trim().toUpperCase());
+      if (nextNewPass) {
+        form.append('clave', nextNewPass);
+      }
       form.append('name', editName.trim());
       form.append('memberName', editMember.trim());
       form.append('bio', editBio);
       if (editCrestFile) {
         form.append('crest', editCrestFile);
       }
-      await apiFetch(`/api/admin/teams/${encodeURIComponent(editingTeam.id)}`, {
-        method: 'PUT',
-        body: form,
-      });
+      const res = await apiFetch<{ team: Team }>(
+        `/api/admin/teams/${encodeURIComponent(editingTeam.id)}`,
+        {
+          method: 'PUT',
+          body: form,
+        }
+      );
+      const updated = res?.team;
       setEditingTeam(null);
+      setEditClave('');
       await onRefresh();
+      if (nextNewPass) {
+        setOneTimeCredentialBanner({
+          title: 'Contraseña actualizada · Copiala para entregarla al participante',
+          id: updated?.id || editId.trim().toUpperCase(),
+          memberName: updated?.memberName || editMember.trim(),
+          teamName: updated?.name || editName.trim(),
+          password: nextNewPass,
+        });
+      }
       setTeamMsg({
         type: 'ok',
-        text: `Datos actualizados (ID: ${editId.trim().toUpperCase()} / Clave: ${editClave.trim()}) para ${editMember.trim()}.`,
+        text: nextNewPass
+          ? `Datos, ID (${editId.trim().toUpperCase()}) y nueva contraseña cifrada guardados para ${editMember.trim()}.`
+          : `Datos e ID (${editId.trim().toUpperCase()}) actualizados para ${editMember.trim()} (se mantuvo la contraseña actual).`,
       });
     } catch (err) {
       setTeamMsg({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Error actualizando equipo.',
+        text: err instanceof Error ? err.message : 'Error actualizando participante.',
       });
     } finally {
       setSavingEditTeam(false);
     }
   };
 
+  const handleToggleParticipantStatus = async (team: Team) => {
+    setTeamMsg(null);
+    setStatusBusyTeamId(team.id);
+    try {
+      const nextStatus = team.accountStatus === 'blocked' ? 'active' : 'blocked';
+      await apiFetch(`/api/admin/teams/${encodeURIComponent(team.id)}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      await onRefresh();
+      setTeamMsg({
+        type: 'ok',
+        text:
+          nextStatus === 'blocked'
+            ? `Cuenta ${team.id} (${team.memberName}) bloqueada. Sus sesiones activas fueron cerradas.`
+            : `Cuenta ${team.id} (${team.memberName}) activada nuevamente.`,
+      });
+    } catch (err) {
+      setTeamMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'No se pudo cambiar el estado de la cuenta.',
+      });
+    } finally {
+      setStatusBusyTeamId(null);
+    }
+  };
+
+  const handleResetParticipantPassword = async (team: Team) => {
+    setTeamMsg(null);
+    setResetBusyTeamId(team.id);
+    try {
+      const res = await apiFetch<{ team: Team; resetPassword: string }>(
+        `/api/admin/teams/${encodeURIComponent(team.id)}/reset-password`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ generate: true }),
+        }
+      );
+      await onRefresh();
+      if (res?.resetPassword) {
+        setOneTimeCredentialBanner({
+          title: 'Credenciales restablecidas · Nueva contraseña temporal lista',
+          id: team.id,
+          memberName: team.memberName,
+          teamName: team.name,
+          password: res.resetPassword,
+        });
+      }
+      setTeamMsg({
+        type: 'ok',
+        text: `Contraseña restablecida para ${team.memberName} (${team.id}). Copiá la nueva contraseña del aviso superior para entregársela.`,
+      });
+    } catch (err) {
+      setTeamMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'No se pudo restablecer la contraseña.',
+      });
+    } finally {
+      setResetBusyTeamId(null);
+    }
+  };
+
   const handleDeleteTeam = async (id: string) => {
-    await apiFetch(`/api/admin/teams/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    await onRefresh();
+    setTeamMsg(null);
+    try {
+      await apiFetch(`/api/admin/teams/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      setConfirmDeleteTeamId(null);
+      if (editingTeam?.id === id) setEditingTeam(null);
+      await onRefresh();
+      setTeamMsg({
+        type: 'ok',
+        text: `Cuenta ${id} eliminada permanentemente.`,
+      });
+    } catch (err) {
+      setTeamMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'No se pudo eliminar la cuenta.',
+      });
+    }
   };
 
   const handleSetAdminTeam = async (id: string) => {
@@ -1098,6 +1245,7 @@ export function ProfileView({
 
   const handleDeleteCommunityVideo = async (id: string) => {
     await deleteDoc(doc(db, 'videos_comunidad', id));
+    notifyCommunityVideosChanged();
     if (settings.featuredVideo?.id === id) {
       await apiFetch('/api/admin/featured-video', { method: 'DELETE' }).catch(() => undefined);
       await onRefresh();
@@ -1325,31 +1473,80 @@ export function ProfileView({
       form.append('subtitle', siteSubtitle);
       form.append('description', siteDescription);
       form.append('bannerText', siteBanner);
-      form.append('adminId', adminLoginId);
       form.append('adminTeamId', adminTeamId);
-      form.append('backupGmail', backupGmail.trim());
       form.append('radioName', radioName.trim());
       form.append('radioStreamUrl', radioStreamUrl.trim());
-      if (adminLoginClave.trim()) form.append('adminClave', adminLoginClave.trim());
       if (siteCrestFile) form.append('crestFile', siteCrestFile);
       if (siteFaviconFile) form.append('faviconFile', siteFaviconFile);
       if (siteCoverFile) form.append('coverFile', siteCoverFile);
       if (siteBackgroundFile) form.append('backgroundFile', siteBackgroundFile);
 
       await apiFetch('/api/admin/settings', { method: 'PUT', body: form });
-      setAdminLoginClave('');
       setSiteCrestFile(null);
       setSiteFaviconFile(null);
       setSiteCoverFile(null);
       setSiteBackgroundFile(null);
       await onRefresh();
-      setSiteMsg({ type: 'ok', text: 'Título, descripciones, fondo, iconos y configuración actualizados.' });
+      setSiteMsg({ type: 'ok', text: 'Título, descripciones, fondo, iconos y configuración general actualizados.' });
       window.setTimeout(() => setSiteMsg(null), 3500);
     } catch (err) {
       setSiteMsg({
         type: 'err',
         text: err instanceof Error ? err.message : 'No se pudo guardar la configuración.',
       });
+    }
+  };
+
+  const handleSaveAdminCredentials = async (e: FormEvent) => {
+    e.preventDefault();
+    setAdminCredMsg(null);
+
+    if (!adminCurrentPassword.trim()) {
+      setAdminCredMsg({
+        type: 'err',
+        text: 'Ingresá tu contraseña actual de Administrador para verificar tu identidad.',
+      });
+      return;
+    }
+
+    if (adminNewPassword.trim() && adminNewPassword.trim() !== adminConfirmPassword.trim()) {
+      setAdminCredMsg({
+        type: 'err',
+        text: 'La nueva contraseña y su confirmación no coinciden.',
+      });
+      return;
+    }
+
+    setSavingAdminCredentials(true);
+    try {
+      const res = await apiFetch<{ token: string; user: AuthUser }>('/api/admin/credentials', {
+        method: 'PUT',
+        body: JSON.stringify({
+          currentPassword: adminCurrentPassword.trim(),
+          nextAdminId: adminLoginId.trim().toUpperCase(),
+          nextPassword: adminNewPassword.trim(),
+          confirmPassword: adminConfirmPassword.trim(),
+          nextBackupGmail: backupGmail.trim(),
+        }),
+      });
+      if (res?.token) {
+        setStoredToken(res.token);
+      }
+      setAdminCurrentPassword('');
+      setAdminNewPassword('');
+      setAdminConfirmPassword('');
+      await onRefresh();
+      setAdminCredMsg({
+        type: 'ok',
+        text: 'Credenciales del Administrador actualizadas con verificación de seguridad. Tu sesión administrativa permanece activa.',
+      });
+    } catch (err) {
+      setAdminCredMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'No se pudieron actualizar las credenciales del Administrador.',
+      });
+    } finally {
+      setSavingAdminCredentials(false);
     }
   };
 
@@ -1822,35 +2019,27 @@ export function ProfileView({
             </button>
           </form>
 
-          {/* Privacidad estricta de clave: solo vos y el Administrador pueden ver tu clave */}
-          <div className="p-4 rounded-xl bg-[#041224] border border-sky-400/35 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="space-y-0.5">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
-                <KeyRound className="w-3.5 h-3.5 text-amber-300" />
-                <span>Mis Credenciales Privadas</span>
+          {/* Credenciales asignadas por el Administrador (solo lectura para participantes) */}
+          <div className="p-4 rounded-xl bg-[#041224] border border-sky-400/35">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                  <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Credenciales de Acceso del Participante</span>
+                </div>
+                <p className="text-[11px] text-sky-200/80">
+                  Tu ID y contraseña son personales y administrados exclusivamente por el Administrador de la Liga. Si necesitás restablecer tu clave, solicitalo al Administrador.
+                </p>
               </div>
-              <p className="text-[11px] text-sky-200/80">
-                Por seguridad, solo el Administrador y vos pueden ver tu clave. Ningún otro miembro puede ver la tuya ni vos la de ellos.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-              <div className="px-3 py-1.5 rounded-lg bg-[#071D38] border border-amber-400/40 text-xs">
-                <span className="text-sky-200/75 mr-1.5">ID:</span>
-                <span className="font-mono font-bold text-white">{user.id}</span>
-              </div>
-              <div className="px-3 py-1.5 rounded-lg bg-[#071D38] border border-amber-400/40 text-xs flex items-center gap-2">
-                <span className="text-sky-200/75">Mi Clave:</span>
-                <span className="font-mono font-bold text-amber-300">
-                  {showOwnClave ? ownClave || 'No disponible' : '••••••••'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowOwnClave((v) => !v)}
-                  aria-label={showOwnClave ? 'Ocultar mi clave' : 'Ver mi clave'}
-                  className="text-sky-200 hover:text-amber-300 transition-colors"
-                >
-                  {showOwnClave ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <div className="px-3 py-1.5 rounded-lg bg-[#071D38] border border-amber-400/40 text-xs">
+                  <span className="text-sky-200/75 mr-1.5">ID de usuario:</span>
+                  <span className="font-mono font-bold text-white">{user.id}</span>
+                </div>
+                <div className="px-3 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-400/40 text-xs flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                  <span className="font-semibold text-emerald-200">Cuenta Activa</span>
+                </div>
               </div>
             </div>
           </div>
@@ -2411,14 +2600,14 @@ export function ProfileView({
                 Panel de Administrador
               </h2>
               <p className="text-xs text-sky-200/80">
-                Creá y editá ID y Clave de los {settings.maxTeams} miembros, cambiá el título y descripciones de la liga, validá partidos, videos, campeones, reglamento, música, fondo, icono y portada.
+                Administrá las cuentas y credenciales de los {settings.maxTeams} participantes, seguridad de tu cuenta Admin, partidos, copas, noticias y configuración general.
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-1 p-1 bg-[#071D38]/95 border border-amber-400/50 rounded-xl">
               {(
                 [
-                  { id: 'equipos', label: `Equipos (${adminTeams.length}/${settings.maxTeams})`, icon: Users },
+                  { id: 'equipos', label: `Participantes (${adminTeams.length}/${settings.maxTeams})`, icon: Users },
                   { id: 'noticias', label: `Noticias (${news.length})`, icon: Megaphone },
                   { id: 'comentarios', label: `Comentarios (${pendingComments.length})`, icon: MessageSquare },
                   { id: 'copa', label: 'Copa de la Liga', icon: Crown },
@@ -2430,7 +2619,7 @@ export function ProfileView({
                   { id: 'musica', label: `Música (${music.length})`, icon: Music },
                   { id: 'videos', label: `Videos (${communityVideos.length + videos.length})`, icon: Film },
                   { id: 'campeones', label: `Campeones (${champions.length})`, icon: Trophy },
-                  { id: 'general', label: 'Título, Descripciones y General', icon: Settings },
+                  { id: 'general', label: 'General y Seguridad Admin', icon: Settings },
                 ] as const
               ).map((tab) => {
                 const Icon = tab.icon;
@@ -2925,9 +3114,55 @@ export function ProfileView({
             />
           )}
 
-          {/* 1. Equipos (hasta 30) */}
+          {/* 1. Administración de Participantes (hasta 30) */}
           {adminTab === 'equipos' && (
             <div className="space-y-6">
+              {oneTimeCredentialBanner && (
+                <div className="p-5 bg-emerald-950/80 border-2 border-emerald-400/70 rounded-2xl shadow-xl space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-bold text-emerald-300">
+                        <ShieldCheck className="w-5 h-5 shrink-0" />
+                        <span>{oneTimeCredentialBanner.title}</span>
+                      </div>
+                      <p className="text-xs text-emerald-100/90">
+                        Participante: <strong>{oneTimeCredentialBanner.memberName}</strong> ({oneTimeCredentialBanner.teamName}). Por seguridad, la contraseña se almacena cifrada (hash) y no volverá a mostrarse en el listado. Copiala ahora para entregársela.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setOneTimeCredentialBanner(null)}
+                      aria-label="Cerrar aviso de credenciales"
+                      className="text-emerald-200 hover:text-white p-1"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-[#041224] border border-emerald-400/40">
+                    <div className="text-xs">
+                      <span className="text-sky-200/80 mr-1.5">ID de usuario:</span>
+                      <span className="font-mono font-bold text-amber-300">{oneTimeCredentialBanner.id}</span>
+                    </div>
+                    <div className="text-xs">
+                      <span className="text-sky-200/80 mr-1.5">Contraseña:</span>
+                      <span className="font-mono font-bold text-emerald-300">{oneTimeCredentialBanner.password}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyCredentials(oneTimeCredentialBanner.id, oneTimeCredentialBanner.password)
+                      }
+                      className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold btn-gold-luxury rounded-lg"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>
+                        {copiedCredentialId === oneTimeCredentialBanner.id ? '¡Copiado!' : 'Copiar Credenciales'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <form
                 onSubmit={handleCreateTeam}
                 className="p-6 bg-[#071D38]/95 border border-amber-400/50 rounded-2xl space-y-4"
@@ -2935,10 +3170,10 @@ export function ProfileView({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h3 className="font-display text-2xl font-bold text-albiceleste-shiny">
-                      Crear ID, Clave y Equipo para Nuevo Miembro ({adminTeams.length} / {settings.maxTeams})
+                      ADMINISTRACIÓN DE PARTICIPANTES · Crear Cuenta ({adminTeams.length} / {settings.maxTeams})
                     </h3>
                     <p className="text-xs text-sky-200/80">
-                      Creá el ID y la Clave de acceso del miembro. Al guardarlo, se publica automáticamente en la Tabla de Posiciones.
+                      Solo el Administrador puede crear participantes. Asigná un ID único y contraseña inicial (se guarda con hash seguro).
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -2984,25 +3219,25 @@ export function ProfileView({
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                      ID de acceso (auto si vacío)
+                      ID único (auto si vacío)
                     </label>
                     <input
                       type="text"
                       value={newTeamId}
-                      onChange={(e) => setNewTeamId(e.target.value)}
+                      onChange={(e) => setNewTeamId(e.target.value.toUpperCase())}
                       placeholder="Auto (Ej: LMA11)"
                       className="w-full px-3 py-2 text-sm font-mono bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                      Clave (auto si vacío)
+                      Contraseña inicial (auto si vacío)
                     </label>
                     <input
                       type="text"
                       value={newTeamClave}
                       onChange={(e) => setNewTeamClave(e.target.value)}
-                      placeholder="Auto (Ej: pes611)"
+                      placeholder="Auto segura si vacío"
                       className="w-full px-3 py-2 text-sm font-mono bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
                     />
                   </div>
@@ -3020,7 +3255,7 @@ export function ProfileView({
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                      Nombre del Miembro
+                      Nombre del Participante *
                     </label>
                     <input
                       type="text"
@@ -3074,30 +3309,54 @@ export function ProfileView({
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold btn-gold-luxury disabled:opacity-50 rounded-xl transition-all"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>{savingTeam ? 'Guardando...' : 'Crear ID/Clave y Publicar en Tabla'}</span>
+                    <span>{savingTeam ? 'Creando cuenta...' : 'Crear Participante y Publicar en Tabla'}</span>
                   </button>
                 </div>
               </form>
 
               <div className="bg-[#071D38]/95 border border-amber-400/50 rounded-2xl overflow-hidden">
-                <div className="px-5 py-4 bg-[#05162B] border-b border-amber-400/45 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="px-5 py-4 bg-[#05162B] border-b border-amber-400/45 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                   <div>
                     <h3 className="font-display text-xl font-bold text-albiceleste-shiny">
-                      Miembros y Credenciales ({adminTeams.length} / {settings.maxTeams})
+                      Lista de Participantes ({adminTeams.length} / {settings.maxTeams})
                     </h3>
                     <p className="text-xs text-sky-200/80">
-                      Tocá &ldquo;Editar ID / Clave&rdquo; en cualquier miembro para cambiar su ID, clave, equipo, nombre o escudo al instante.
+                      Modificá ID, cambiá o restablecé contraseñas cifradas, activá/bloqueá cuentas o eliminá participantes.
                     </p>
                   </div>
-                  <div className="relative w-full sm:w-72">
-                    <Search className="w-4 h-4 text-sky-200/80 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      type="text"
-                      value={teamSearch}
-                      onChange={(e) => setTeamSearch(e.target.value)}
-                      placeholder="Buscar por ID, miembro o equipo..."
-                      className="w-full pl-9 pr-3 py-2 text-xs bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
-                    />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="inline-flex rounded-lg bg-[#041224] border border-amber-400/40 p-0.5 text-xs">
+                      {(
+                        [
+                          { id: 'all', label: 'Todos' },
+                          { id: 'active', label: 'Activos' },
+                          { id: 'blocked', label: 'Bloqueados' },
+                        ] as const
+                      ).map((f) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setTeamStatusFilter(f.id)}
+                          className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                            teamStatusFilter === f.id
+                              ? 'bg-amber-400 text-[#071D38]'
+                              : 'text-sky-200 hover:text-white'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="relative w-full sm:w-64">
+                      <Search className="w-4 h-4 text-sky-200/80 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={teamSearch}
+                        onChange={(e) => setTeamSearch(e.target.value)}
+                        placeholder="Buscar por ID, miembro o equipo..."
+                        className="w-full pl-9 pr-3 py-2 text-xs bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -3106,10 +3365,11 @@ export function ProfileView({
                     <thead>
                       <tr className="border-b border-amber-400/45 bg-[#05162B]/80 text-xs font-semibold text-amber-200/80">
                         <th className="py-3 pl-5 pr-2 text-left">Escudo</th>
-                        <th className="py-3 px-3 text-left">ID de Acceso</th>
-                        <th className="py-3 px-3 text-left">Clave</th>
+                        <th className="py-3 px-3 text-left">ID de Usuario</th>
+                        <th className="py-3 px-3 text-left">Contraseña</th>
+                        <th className="py-3 px-3 text-left">Estado</th>
                         <th className="py-3 px-3 text-left">Equipo</th>
-                        <th className="py-3 px-3 text-left">Miembro</th>
+                        <th className="py-3 px-3 text-left">Participante</th>
                         <th className="py-3 px-3 text-left">En Tabla</th>
                         <th className="py-3 pl-3 pr-5 text-right">Acciones</th>
                       </tr>
@@ -3117,14 +3377,15 @@ export function ProfileView({
                     <tbody className="divide-y divide-amber-400/15">
                       {filteredAdminTeams.length === 0 ? (
                         <tr>
-                          <td colSpan={7} className="py-8 text-center text-xs text-sky-200/80">
-                            No se encontraron miembros con &ldquo;{teamSearch}&rdquo;.
+                          <td colSpan={8} className="py-8 text-center text-xs text-sky-200/80">
+                            No se encontraron participantes con los filtros actuales.
                           </td>
                         </tr>
                       ) : (
                         filteredAdminTeams.map((t) => {
                           const isAdminOwn = t.id === settings.adminTeamId;
                           const isEditingRow = editingTeam?.id === t.id;
+                          const isBlocked = t.accountStatus === 'blocked';
                           const standing = standingsMap.get(t.id);
                           return (
                             <Fragment key={t.id}>
@@ -3140,8 +3401,24 @@ export function ProfileView({
                                 <td className="py-2.5 px-3 font-mono text-xs font-bold text-amber-300">
                                   {t.id}
                                 </td>
-                                <td className="py-2.5 px-3 font-mono text-xs text-amber-200">
-                                  {t.clave}
+                                <td className="py-2.5 px-3">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono text-sky-200 bg-[#041224] border border-sky-400/30 rounded-md">
+                                    <Lock className="w-3 h-3 text-amber-300" />
+                                    <span>Cifrada (Hash)</span>
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 whitespace-nowrap">
+                                  {isBlocked ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-rose-200 bg-rose-500/20 border border-rose-400/40 rounded-md">
+                                      <Lock className="w-3 h-3" />
+                                      <span>Bloqueada</span>
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 bg-emerald-500/20 border border-emerald-400/40 rounded-md">
+                                      <ShieldCheck className="w-3 h-3" />
+                                      <span>Activa</span>
+                                    </span>
+                                  )}
                                 </td>
                                 <td className="py-2.5 px-3 font-semibold text-amber-50">
                                   {t.name}
@@ -3169,46 +3446,99 @@ export function ProfileView({
                                     <span className="text-[11px] text-sky-200/80">Sin registro</span>
                                   )}
                                 </td>
-                                <td className="py-2.5 pl-3 pr-5 text-right space-x-2 whitespace-nowrap">
-                                  {!isAdminOwn && (
+                                <td className="py-2.5 pl-3 pr-5 text-right whitespace-nowrap">
+                                  <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                                    {!isAdminOwn && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSetAdminTeam(t.id)}
+                                        className="px-2.5 py-1 text-xs font-semibold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 rounded-lg"
+                                      >
+                                        Mi Equipo
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
-                                      onClick={() => handleSetAdminTeam(t.id)}
-                                      className="px-2.5 py-1 text-xs font-semibold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 rounded-lg"
+                                      onClick={() => startEditTeam(t)}
+                                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors ${
+                                        isEditingRow
+                                          ? 'btn-gold-luxury'
+                                          : 'text-amber-100 bg-[#0A294E] hover:bg-[#0D3666] border border-amber-400/45'
+                                      }`}
                                     >
-                                      Usar como mi equipo
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                      <span>{isEditingRow ? 'Cerrar' : 'Editar ID / Clave'}</span>
                                     </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => startEditTeam(t)}
-                                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors ${
-                                      isEditingRow
-                                        ? 'btn-gold-luxury'
-                                        : 'text-amber-100 bg-[#0A294E] hover:bg-[#0D3666] border border-amber-400/45'
-                                    }`}
-                                  >
-                                    <Edit3 className="w-3.5 h-3.5" />
-                                    <span>{isEditingRow ? 'Cerrando' : 'Editar ID / Clave'}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteTeam(t.id)}
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 rounded-lg"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    <span>Borrar</span>
-                                  </button>
+                                    <button
+                                      type="button"
+                                      disabled={resetBusyTeamId === t.id}
+                                      onClick={() => handleResetParticipantPassword(t)}
+                                      title="Generar nueva contraseña aleatoria y cerrar sesiones anteriores"
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-sky-200 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/35 rounded-lg disabled:opacity-50"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                      <span>{resetBusyTeamId === t.id ? '...' : 'Restablecer'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={statusBusyTeamId === t.id}
+                                      onClick={() => handleToggleParticipantStatus(t)}
+                                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg disabled:opacity-50 ${
+                                        isBlocked
+                                          ? 'text-emerald-200 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40'
+                                          : 'text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35'
+                                      }`}
+                                    >
+                                      {isBlocked ? (
+                                        <>
+                                          <Unlock className="w-3.5 h-3.5" />
+                                          <span>Activar</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Lock className="w-3.5 h-3.5" />
+                                          <span>Bloquear</span>
+                                        </>
+                                      )}
+                                    </button>
+                                    {confirmDeleteTeamId === t.id ? (
+                                      <div className="inline-flex items-center gap-1 bg-rose-950/80 border border-rose-400/60 rounded-lg px-1.5 py-0.5">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteTeam(t.id)}
+                                          className="px-2 py-0.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 rounded"
+                                        >
+                                          Confirmar
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteTeamId(null)}
+                                          className="px-2 py-0.5 text-xs text-sky-200 hover:text-white"
+                                        >
+                                          Cancelar
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmDeleteTeamId(t.id)}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 rounded-lg"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        <span>Borrar</span>
+                                      </button>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
 
                               {isEditingRow && (
                                 <tr ref={editFormRef} className="bg-[#08264A]">
-                                  <td colSpan={7} className="p-5 border-t border-b border-amber-400/40">
+                                  <td colSpan={8} className="p-5 border-t border-b border-amber-400/40">
                                     <form onSubmit={handleSaveEditTeam} className="space-y-4">
                                       <div className="flex items-center justify-between gap-2">
                                         <div className="text-xs font-semibold text-amber-300">
-                                          Editando credenciales y datos de <strong className="text-amber-50">{t.name} ({t.id})</strong>
+                                          Editando cuenta de <strong className="text-amber-50">{t.name} ({t.id})</strong>
                                         </div>
                                         <button
                                           type="button"
@@ -3222,26 +3552,26 @@ export function ProfileView({
                                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                                         <div>
                                           <label className="block text-xs font-semibold text-amber-300 mb-1">
-                                            ID de Acceso
+                                            ID de Usuario
                                           </label>
                                           <input
                                             type="text"
                                             required
                                             value={editId}
-                                            onChange={(e) => setEditId(e.target.value)}
+                                            onChange={(e) => setEditId(e.target.value.toUpperCase())}
                                             className="w-full px-3 py-2 text-sm font-mono font-bold bg-[#041224] text-amber-50 border border-amber-400/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
                                           />
                                         </div>
                                         <div>
                                           <label className="block text-xs font-semibold text-amber-300 mb-1">
-                                            Clave de Acceso
+                                            Nueva Contraseña (opcional)
                                           </label>
                                           <input
-                                            type="text"
-                                            required
+                                            type="password"
                                             value={editClave}
                                             onChange={(e) => setEditClave(e.target.value)}
-                                            className="w-full px-3 py-2 text-sm font-mono font-bold bg-[#041224] text-amber-50 border border-amber-400/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                            placeholder="Dejar vacío para mantener"
+                                            className="w-full px-3 py-2 text-sm font-mono bg-[#041224] text-amber-50 border border-amber-400/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
                                           />
                                         </div>
                                         <div>
@@ -3258,7 +3588,7 @@ export function ProfileView({
                                         </div>
                                         <div>
                                           <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                                            Nombre Miembro
+                                            Nombre Participante
                                           </label>
                                           <input
                                             type="text"
@@ -3314,7 +3644,7 @@ export function ProfileView({
                                           disabled={savingEditTeam}
                                           className="px-5 py-2 text-xs font-semibold btn-gold-luxury disabled:opacity-50 rounded-lg"
                                         >
-                                          {savingEditTeam ? 'Guardando...' : 'Guardar ID, Clave y Datos'}
+                                          {savingEditTeam ? 'Guardando...' : 'Guardar Cambios'}
                                         </button>
                                       </div>
                                     </form>
@@ -3328,6 +3658,52 @@ export function ProfileView({
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              {/* Registro de Auditoría de Credenciales */}
+              <div className="bg-[#071D38]/95 border border-amber-400/40 rounded-2xl overflow-hidden">
+                <div className="px-5 py-4 bg-[#05162B] border-b border-amber-400/35 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <History className="w-5 h-5 text-amber-300" />
+                    <div>
+                      <h3 className="font-display text-lg font-bold text-albiceleste-shiny">
+                        Registro de Auditoría de Credenciales ({credentialAuditLog.length})
+                      </h3>
+                      <p className="text-[11px] text-sky-200/80">
+                        Historial seguro de todas las creaciones, cambios de ID, restablecimientos, bloqueos y eliminaciones realizados por el Administrador.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                {credentialAuditLog.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-sky-200/75">
+                    Aún no se registraron movimientos administrativos sobre credenciales.
+                  </div>
+                ) : (
+                  <div className="max-h-72 overflow-y-auto divide-y divide-amber-400/15">
+                    {credentialAuditLog.slice(0, 40).map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs hover:bg-white/[0.02]"
+                      >
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono font-bold text-amber-300">{entry.targetId}</span>
+                            <span className="text-white font-semibold">{entry.targetLabel}</span>
+                            <span className="px-2 py-0.5 rounded bg-[#0A294E] border border-amber-400/35 text-[10px] font-mono text-sky-200">
+                              {entry.action}
+                            </span>
+                          </div>
+                          <p className="text-sky-100/85">{entry.details}</p>
+                        </div>
+                        <div className="text-[11px] text-sky-200/70 shrink-0 text-left sm:text-right font-mono">
+                          <div>Por: {entry.performedBy}</div>
+                          <div>{new Date(entry.createdAt).toLocaleString('es-AR')}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -4984,265 +5360,342 @@ export function ProfileView({
             </div>
           )}
 
-          {/* 7. Fondo, Icono, Portada y General */}
+          {/* 7. General y Seguridad de la Cuenta del Administrador */}
           {adminTab === 'general' && (
-            <form
-              onSubmit={handleSaveSettings}
-              className="p-6 bg-[#071D38]/95 border border-amber-400/50 rounded-2xl space-y-5"
-            >
-              <h3 className="font-display text-2xl font-bold text-albiceleste-shiny">
-                Título de la Liga, Descripciones, Fondo, Icono y Configuración General
-              </h3>
-              {siteMsg && (
-                <div
-                  className={`p-3 text-sm rounded-xl border ${
-                    siteMsg.type === 'ok'
-                      ? 'bg-emerald-950/60 border-emerald-400/40 text-emerald-200'
-                      : 'bg-rose-950/60 border-rose-400/40 text-rose-200'
-                  }`}
-                >
-                  {siteMsg.text}
+            <div className="space-y-6">
+              {/* Cuenta del Administrador con verificación de contraseña actual */}
+              <form
+                onSubmit={handleSaveAdminCredentials}
+                className="p-6 bg-[#071D38]/95 border-2 border-amber-400/60 rounded-2xl space-y-5 shadow-xl"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="font-display text-2xl font-bold text-albiceleste-shiny flex items-center gap-2">
+                      <ShieldCheck className="w-6 h-6 text-amber-300" />
+                      <span>Seguridad y Cuenta del Administrador</span>
+                    </h3>
+                    <p className="text-xs text-sky-200/85">
+                      Modificá tu ID administrativo, contraseña o correo de recuperación. Por seguridad, cualquier cambio exige confirmar tu contraseña actual y mantiene siempre tu acceso administrativo.
+                    </p>
+                  </div>
                 </div>
-              )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Título de la Liga (Encabezado Principal)
-                  </label>
-                  <input
-                    type="text"
-                    value={siteTitle}
-                    onChange={(e) => setSiteTitle(e.target.value)}
-                    placeholder="Liga Master Argentina Pes6"
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Subtítulo / Descripción Corta (Temporada y Parche)
-                  </label>
-                  <input
-                    type="text"
-                    value={siteSubtitle}
-                    onChange={(e) => setSiteSubtitle(e.target.value)}
-                    placeholder="(TEMPORADA 2026-2027) THE DEN PATCH"
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Descripción Principal de la Liga (visible en el Inicio debajo del título)
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={siteDescription}
-                    onChange={(e) => setSiteDescription(e.target.value)}
-                    placeholder="Escribí una descripción general de la liga, temporada o reglas destacadas..."
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Descripción Destacada de Portada (debajo de la foto principal)
-                  </label>
-                  <input
-                    type="text"
-                    value={siteBanner}
-                    onChange={(e) => setSiteBanner(e.target.value)}
-                    placeholder="Esto es Liga Master Argentina"
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Equipo del Administrador en la Liga
-                  </label>
-                  <select
-                    value={adminTeamId}
-                    onChange={(e) => setAdminTeamId(e.target.value)}
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                {adminCredMsg && (
+                  <div
+                    className={`p-3 text-sm rounded-xl border ${
+                      adminCredMsg.type === 'ok'
+                        ? 'bg-emerald-950/60 border-emerald-400/40 text-emerald-200'
+                        : 'bg-rose-950/60 border-rose-400/40 text-rose-200'
+                    }`}
                   >
-                    <option value="">Sin equipo asignado</option>
-                    {adminTeams.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name} ({t.id})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    ID del Administrador
-                  </label>
-                  <input
-                    type="text"
-                    value={adminLoginId}
-                    onChange={(e) => setAdminLoginId(e.target.value)}
-                    className="w-full px-3.5 py-2 text-sm font-mono bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-sky-100/90 mb-1">
-                    Nueva Clave del Admin (dejar vacío para mantener)
-                  </label>
-                  <input
-                    type="password"
-                    value={adminLoginClave}
-                    onChange={(e) => setAdminLoginClave(e.target.value)}
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                </div>
-                <div className="sm:col-span-2 p-4 rounded-xl bg-[#05162B] border border-amber-400/50 space-y-2">
-                  <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
-                    <Mail className="w-3.5 h-3.5" />
-                    <span>Gmail Privado de Respaldo del Administrador (nadie más puede verlo)</span>
-                  </label>
-                  <input
-                    type="email"
-                    value={backupGmail}
-                    onChange={(e) => setBackupGmail(e.target.value)}
-                    placeholder="tucorreo@gmail.com (solo para recuperar usuario y clave Admin)"
-                    className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                  />
-                  <p className="text-[11px] text-sky-200/80">
-                    Este correo jamás se muestra a los miembros ni en el sitio público. Solo sirve para recuperar tu ID y Clave de Administrador desde la pantalla de ingreso.
-                  </p>
-                </div>
+                    {adminCredMsg.text}
+                  </div>
+                )}
 
-                <div className="sm:col-span-2 p-4 rounded-xl bg-[#05162B] border border-amber-400/50 space-y-3">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
-                      <Radio className="w-3.5 h-3.5" />
-                      <span>Radio FM Argentina En Vivo (Emisora Principal debajo del MP3)</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-amber-200 mb-1">
+                      ID de acceso del Administrador *
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRadioName('FM 101.5 Pop Radio (Bs. As.)');
-                        setRadioStreamUrl('https://popradio.stweb.tv/popradio/live/playlist.m3u8');
-                      }}
-                      className="text-[11px] font-semibold text-sky-300 hover:text-amber-300 underline"
+                    <input
+                      type="text"
+                      required
+                      value={adminLoginId}
+                      onChange={(e) => setAdminLoginId(e.target.value.toUpperCase())}
+                      className="w-full px-3.5 py-2 text-sm font-mono bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-amber-200 mb-1">
+                      Contraseña actual (verificación obligatoria) *
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={adminCurrentPassword}
+                      onChange={(e) => setAdminCurrentPassword(e.target.value)}
+                      placeholder="Ingresá tu contraseña actual para confirmar"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Nueva contraseña (opcional · mín. 6 caracteres)
+                    </label>
+                    <input
+                      type="password"
+                      minLength={6}
+                      value={adminNewPassword}
+                      onChange={(e) => setAdminNewPassword(e.target.value)}
+                      placeholder="Dejar vacío para mantener la actual"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Confirmar nueva contraseña
+                    </label>
+                    <input
+                      type="password"
+                      minLength={6}
+                      value={adminConfirmPassword}
+                      onChange={(e) => setAdminConfirmPassword(e.target.value)}
+                      placeholder="Repetí la nueva contraseña"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div className="sm:col-span-2 p-4 rounded-xl bg-[#05162B] border border-amber-400/45 space-y-2">
+                    <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Correo Electrónico de Recuperación del Administrador *</span>
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={backupGmail}
+                      onChange={(e) => setBackupGmail(e.target.value)}
+                      placeholder="Correo privado de recuperación del Administrador"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                    <p className="text-[11px] text-sky-200/80">
+                      Este correo es privado del Administrador y jamás se muestra a los participantes. Sirve exclusivamente para recuperar la contraseña administrativa.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingAdminCredentials}
+                    className="px-5 py-2.5 text-sm font-semibold btn-gold-luxury disabled:opacity-50 rounded-xl transition-all"
+                  >
+                    {savingAdminCredentials
+                      ? 'Verificando y guardando...'
+                      : 'Actualizar Credenciales del Administrador'}
+                  </button>
+                </div>
+              </form>
+
+              <form
+                onSubmit={handleSaveSettings}
+                className="p-6 bg-[#071D38]/95 border border-amber-400/50 rounded-2xl space-y-5"
+              >
+                <h3 className="font-display text-2xl font-bold text-albiceleste-shiny">
+                  Título de la Liga, Descripciones, Fondo, Icono y Configuración General
+                </h3>
+                {siteMsg && (
+                  <div
+                    className={`p-3 text-sm rounded-xl border ${
+                      siteMsg.type === 'ok'
+                        ? 'bg-emerald-950/60 border-emerald-400/40 text-emerald-200'
+                        : 'bg-rose-950/60 border-rose-400/40 text-rose-200'
+                    }`}
+                  >
+                    {siteMsg.text}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Título de la Liga (Encabezado Principal)
+                    </label>
+                    <input
+                      type="text"
+                      value={siteTitle}
+                      onChange={(e) => setSiteTitle(e.target.value)}
+                      placeholder="Liga Master Argentina Pes6"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Subtítulo / Descripción Corta (Temporada y Parche)
+                    </label>
+                    <input
+                      type="text"
+                      value={siteSubtitle}
+                      onChange={(e) => setSiteSubtitle(e.target.value)}
+                      placeholder="(TEMPORADA 2026-2027) THE DEN PATCH"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Descripción Principal de la Liga (visible en el Inicio debajo del título)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={siteDescription}
+                      onChange={(e) => setSiteDescription(e.target.value)}
+                      placeholder="Escribí una descripción general de la liga, temporada o reglas destacadas..."
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Descripción Destacada de Portada (debajo de la foto principal)
+                    </label>
+                    <input
+                      type="text"
+                      value={siteBanner}
+                      onChange={(e) => setSiteBanner(e.target.value)}
+                      placeholder="Esto es Liga Master Argentina"
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-sky-100/90 mb-1">
+                      Equipo del Administrador en la Liga
+                    </label>
+                    <select
+                      value={adminTeamId}
+                      onChange={(e) => setAdminTeamId(e.target.value)}
+                      className="w-full px-3.5 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
                     >
-                      Restaurar Pop Radio 101.5
-                    </button>
+                      <option value="">Sin equipo asignado</option>
+                      {adminTeams.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.id})
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-sky-100/90 mb-1">
-                        Nombre de la Radio FM
+
+                  <div className="sm:col-span-2 p-4 rounded-xl bg-[#05162B] border border-amber-400/50 space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                        <Radio className="w-3.5 h-3.5" />
+                        <span>Radio FM Argentina En Vivo (Emisora Principal debajo del MP3)</span>
                       </label>
-                      <input
-                        type="text"
-                        value={radioName}
-                        onChange={(e) => setRadioName(e.target.value)}
-                        placeholder="FM 101.5 Pop Radio (Bs. As.)"
-                        className="w-full px-3 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRadioName('FM 101.5 Pop Radio (Bs. As.)');
+                          setRadioStreamUrl('https://popradio.stweb.tv/popradio/live/playlist.m3u8');
+                        }}
+                        className="text-[11px] font-semibold text-sky-300 hover:text-amber-300 underline"
+                      >
+                        Restaurar Pop Radio 101.5
+                      </button>
                     </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-sky-100/90 mb-1">
-                        URL del Stream En Vivo (.m3u8 / .mp3 / .aac)
-                      </label>
-                      <input
-                        type="url"
-                        value={radioStreamUrl}
-                        onChange={(e) => setRadioStreamUrl(e.target.value)}
-                        placeholder="https://..."
-                        className="w-full px-3 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-amber-400/15">
-                <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
-                  <div className="flex items-center gap-3">
-                    <ResilientImage
-                      src={settings.faviconUrl || settings.crestUrl}
-                      fallbackSrc={DEFAULT_CREST}
-                      alt="Icono actual de la página"
-                      className="w-10 h-10 rounded-full object-cover border border-amber-400/40"
-                    />
-                    <div>
-                      <div className="text-xs font-semibold text-amber-300">
-                        Icono de la Página (Pestaña y Barra)
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-sky-100/90 mb-1">
+                          Nombre de la Radio FM
+                        </label>
+                        <input
+                          type="text"
+                          value={radioName}
+                          onChange={(e) => setRadioName(e.target.value)}
+                          placeholder="FM 101.5 Pop Radio (Bs. As.)"
+                          className="w-full px-3 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                        />
                       </div>
-                      <div className="text-[11px] text-sky-200/80">PNG, ICO, SVG o JPG</div>
-                    </div>
-                  </div>
-                  <input
-                    type="file"
-                    accept="image/*,.ico"
-                    onChange={(e) => setSiteFaviconFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
-                  />
-                </div>
-
-                <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
-                  <div className="flex items-center gap-3">
-                    <ResilientImage
-                      src={settings.crestUrl}
-                      fallbackSrc={DEFAULT_CREST}
-                      alt="Escudo oficial de la liga"
-                      className="w-10 h-10 rounded-full object-cover border border-amber-400/40"
-                    />
-                    <div>
-                      <div className="text-xs font-semibold text-amber-300">
-                        Escudo / Logo de la Liga
+                      <div>
+                        <label className="block text-[11px] font-semibold text-sky-100/90 mb-1">
+                          URL del Stream En Vivo (.m3u8 / .mp3 / .aac)
+                        </label>
+                        <input
+                          type="url"
+                          value={radioStreamUrl}
+                          onChange={(e) => setRadioStreamUrl(e.target.value)}
+                          placeholder="https://..."
+                          className="w-full px-3 py-2 text-sm bg-[#041224] text-amber-50 border border-amber-400/50 rounded-lg"
+                        />
                       </div>
-                      <div className="text-[11px] text-sky-200/80">Intro y debajo de portada</div>
                     </div>
                   </div>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setSiteCrestFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
-                  />
                 </div>
 
-                <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
-                  <div>
-                    <div className="text-xs font-semibold text-amber-200">
-                      Cambiar Imagen de Portada
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-amber-400/15">
+                  <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
+                    <div className="flex items-center gap-3">
+                      <ResilientImage
+                        src={settings.faviconUrl || settings.crestUrl}
+                        fallbackSrc={DEFAULT_CREST}
+                        alt="Icono actual de la página"
+                        className="w-10 h-10 rounded-full object-cover border border-amber-400/40"
+                      />
+                      <div>
+                        <div className="text-xs font-semibold text-amber-300">
+                          Icono de la Página (Pestaña y Barra)
+                        </div>
+                        <div className="text-[11px] text-sky-200/80">PNG, ICO, SVG o JPG</div>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-sky-200/80">Recomendado 16:9 (PNG/JPG)</div>
+                    <input
+                      type="file"
+                      accept="image/*,.ico"
+                      onChange={(e) => setSiteFaviconFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
+                    />
                   </div>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setSiteCoverFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
-                  />
-                </div>
 
-                <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
-                  <div>
-                    <div className="text-xs font-semibold text-amber-200">
-                      Cambiar Fondo de la Página
+                  <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
+                    <div className="flex items-center gap-3">
+                      <ResilientImage
+                        src={settings.crestUrl}
+                        fallbackSrc={DEFAULT_CREST}
+                        alt="Escudo oficial de la liga"
+                        className="w-10 h-10 rounded-full object-cover border border-amber-400/40"
+                      />
+                      <div>
+                        <div className="text-xs font-semibold text-amber-300">
+                          Escudo / Logo de la Liga
+                        </div>
+                        <div className="text-[11px] text-sky-200/80">Intro y debajo de portada</div>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-sky-200/80">Imagen completa de fondo (JPG/PNG/WEBP)</div>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setSiteCrestFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
+                    />
                   </div>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setSiteBackgroundFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
-                  />
-                </div>
-              </div>
 
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 text-sm font-semibold btn-gold-luxury rounded-xl transition-all"
-                >
-                  Guardar Configuración Completa
-                </button>
-              </div>
-            </form>
+                  <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
+                    <div>
+                      <div className="text-xs font-semibold text-amber-200">
+                        Cambiar Imagen de Portada
+                      </div>
+                      <div className="text-[11px] text-sky-200/80">Recomendado 16:9 (PNG/JPG)</div>
+                    </div>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setSiteCoverFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
+                    />
+                  </div>
+
+                  <div className="p-4 bg-[#05162B] border border-amber-400/45 rounded-xl space-y-2">
+                    <div>
+                      <div className="text-xs font-semibold text-amber-200">
+                        Cambiar Fondo de la Página
+                      </div>
+                      <div className="text-[11px] text-sky-200/80">Imagen completa de fondo (JPG/PNG/WEBP)</div>
+                    </div>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setSiteBackgroundFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-sky-100/90 file:mr-2 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-amber-400/20 file:text-amber-300"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 text-sm font-semibold btn-gold-luxury rounded-xl transition-all"
+                  >
+                    Guardar Configuración Completa
+                  </button>
+                </div>
+              </form>
+            </div>
           )}
         </section>
       )}

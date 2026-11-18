@@ -18,7 +18,7 @@ import { RulesView } from './components/RulesView';
 import { StandingsView } from './components/StandingsView';
 import type { AuthUser, LastListenedTrack, LeagueBootstrap } from './types';
 import { useCommunityVideos } from './hooks/useCommunityVideos';
-import { apiFetch, setStoredToken } from './utils/api';
+import { apiFetch, resolveApiUrl, setStoredToken } from './utils/api';
 import { buildInlineTeamCrestSvg, resolveAssetUrl } from './utils/assetUrl';
 import { computeStandings } from './utils/standings';
 
@@ -104,6 +104,7 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [showIntro, setShowIntro] = useState(true);
+  const [introContentReady, setIntroContentReady] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>('inicio');
   const [gallerySubTab, setGallerySubTab] = useState<'videos' | 'campeones'>('videos');
   const [matchesSubTab, setMatchesSubTab] = useState<MatchesSubTab>('validated');
@@ -153,8 +154,29 @@ export default function App() {
   useEffect(() => {
     if (resetPageState.active) {
       setShowIntro(false);
+      setIntroContentReady(true);
     }
   }, [resetPageState.active]);
+
+  useEffect(() => {
+    if (!showIntro) {
+      setIntroContentReady(true);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setIntroContentReady(true);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [showIntro]);
+
+  const handleIntroCurtainStart = useCallback(() => {
+    setIntroContentReady(true);
+  }, []);
+
+  const handleIntroFinish = useCallback(() => {
+    setShowIntro(false);
+    setIntroContentReady(true);
+  }, []);
 
   const handleExitResetPage = useCallback((adminId?: string) => {
     setResetPageState({ active: false, oobCode: null });
@@ -225,7 +247,7 @@ export default function App() {
 
     let es: EventSource | null = null;
     if (typeof EventSource !== 'undefined') {
-      es = new EventSource('/api/events');
+      es = new EventSource(resolveApiUrl('/api/events'));
       es.addEventListener('db_updated', () => {
         void fetchBootstrap();
       });
@@ -488,12 +510,22 @@ export default function App() {
     [data?.user, data?.settings.adminTeamId]
   );
 
+  const openAuthModal = useCallback(() => {
+    setAuthModalOpen(true);
+  }, []);
+
   const handleAuthSuccess = async (_user: AuthUser) => {
     await fetchBootstrap();
   };
 
   const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors while clearing client session
+    }
     setStoredToken(null);
+    setProfileSubTab(undefined);
     await fetchBootstrap();
   };
 
@@ -524,15 +556,17 @@ export default function App() {
   return (
     <div className="relative min-h-screen flex flex-col bg-[#050608] text-white pb-8">
       {/* Fondo de pantalla completo optimizado para scroll fluido */}
-      <div
-        className="fixed inset-0 z-0 bg-cover bg-center bg-no-repeat pointer-events-none"
-        style={{
-          backgroundImage: `url('${resolveAssetUrl(
-            data?.settings.backgroundUrl || PAGE_BACKGROUND_IMAGE
-          )}')`,
-        }}
-        aria-hidden="true"
-      />
+      {(!showIntro || introContentReady) && (
+        <div
+          className="fixed inset-0 z-0 bg-cover bg-center bg-no-repeat pointer-events-none"
+          style={{
+            backgroundImage: `url('${resolveAssetUrl(
+              data?.settings.backgroundUrl || PAGE_BACKGROUND_IMAGE
+            )}')`,
+          }}
+          aria-hidden="true"
+        />
+      )}
       <div
         className="fixed inset-0 z-0 bg-gradient-to-b from-[#040507]/88 via-[#090B10]/82 to-[#040507]/92 pointer-events-none"
         aria-hidden="true"
@@ -543,7 +577,8 @@ export default function App() {
           iconUrl={introIcon}
           title={data?.settings.title || 'Liga Master Argentina Pes6'}
           subtitle={data?.settings.subtitle || '(TEMPORADA 2026-2027) THE DEN PATCH'}
-          onFinish={() => setShowIntro(false)}
+          onCurtainStart={handleIntroCurtainStart}
+          onFinish={handleIntroFinish}
         />
       )}
 
@@ -587,7 +622,7 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                onClick={() => setAuthModalOpen(true)}
+                onClick={openAuthModal}
                 className="px-3.5 py-2 text-xs font-bold btn-gold-luxury rounded-lg transition-all whitespace-nowrap shrink-0"
               >
                 Ingresar a Cuenta
@@ -660,7 +695,8 @@ export default function App() {
             </button>
           </div>
         ) : (
-          data && (
+          data &&
+          (!showIntro || introContentReady) && (
             <>
               {activeTab === 'inicio' && (
                 <HomeView
@@ -696,7 +732,7 @@ export default function App() {
                   standings={standings}
                   maxTeams={data.settings.maxTeams}
                   user={data.user}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={openAuthModal}
                   onRefresh={fetchBootstrap}
                   onViewParticipant={(teamId) => setViewingTeamId(teamId)}
                 />
@@ -711,7 +747,7 @@ export default function App() {
                   cup={data.cup}
                   user={data.user}
                   initialSubTab={matchesSubTab}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={openAuthModal}
                   onOpenCups={() => handleNavigate('copas')}
                   onRefresh={fetchBootstrap}
                 />
@@ -765,7 +801,7 @@ export default function App() {
                   champions={data.champions}
                   user={data.user}
                   initialSubTab={gallerySubTab}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={openAuthModal}
                   onRefresh={fetchBootstrap}
                 />
               )}
@@ -792,9 +828,9 @@ export default function App() {
                   news={data.news || []}
                   comments={data.comments || []}
                   likedTeams={likedTeams}
-                  ownClave={data.ownClave}
+                  credentialAuditLog={data.credentialAuditLog || []}
                   initialAdminTab={profileSubTab}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={openAuthModal}
                   onLogout={handleLogout}
                   onRefresh={fetchBootstrap}
                   onNavigate={handleNavigate}
@@ -891,6 +927,7 @@ export default function App() {
       <AuthModal
         open={authModalOpen}
         prefillId={prefillAuthId}
+        staticHostingMode={staticHostingMode}
         onClose={() => setAuthModalOpen(false)}
         onSuccess={handleAuthSuccess}
       />

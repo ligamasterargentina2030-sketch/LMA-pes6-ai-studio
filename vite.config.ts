@@ -63,7 +63,12 @@ export default defineConfig(() => {
           ],
           globIgnores: ['**/assets/aistudio/**'],
           maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
-          navigateFallbackDenylist: [/^\/api\//, /^\/uploads\//],
+          navigateFallbackDenylist: [
+            /^\/api\//,
+            /^\/uploads\//,
+            /^\/Liga-Master-Argentina-PES6\/api\//,
+            /^\/Liga-Master-Argentina-PES6\/uploads\//,
+          ],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

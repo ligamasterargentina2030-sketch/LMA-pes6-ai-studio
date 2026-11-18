@@ -89,7 +89,9 @@ interface LeagueSettings {
   backgroundUrl?: string;
   faviconUrl?: string;
   adminId: string;
-  adminClave: string;
+  adminClave?: string;
+  adminClaveHash?: string;
+  adminTokenVersion?: number;
   adminTeamId?: string;
   backupGmail?: string;
   featuredVideo?: FeaturedVideoSelection | null;
@@ -121,7 +123,11 @@ interface LastListenedTrack {
 
 interface Team {
   id: string;
-  clave: string;
+  clave?: string;
+  claveHash?: string;
+  accountStatus?: 'active' | 'blocked';
+  tokenVersion?: number;
+  credentialsUpdatedAt?: string;
   name: string;
   memberName: string;
   crestUrl: string;
@@ -395,6 +401,27 @@ interface LeagueComment {
   createdAt: string;
 }
 
+type CredentialAuditAction =
+  | 'create_participant'
+  | 'update_participant_id'
+  | 'reset_participant_password'
+  | 'block_participant'
+  | 'activate_participant'
+  | 'delete_participant'
+  | 'update_admin_credentials'
+  | 'admin_firebase_password_reset';
+
+interface CredentialAuditEntry {
+  id: string;
+  action: CredentialAuditAction;
+  targetType: 'participant' | 'admin';
+  targetId: string;
+  targetLabel: string;
+  details: string;
+  performedBy: string;
+  createdAt: string;
+}
+
 interface LeagueDatabase {
   settings: LeagueSettings;
   teams: Team[];
@@ -412,6 +439,7 @@ interface LeagueDatabase {
   comments?: LeagueComment[];
   pageLikes?: number;
   adminResetTokens?: AdminResetToken[];
+  credentialAuditLog?: CredentialAuditEntry[];
 }
 
 interface TokenPayload {
@@ -419,6 +447,7 @@ interface TokenPayload {
   id: string;
   displayName: string;
   teamId?: string;
+  tokenVersion?: number;
   exp: number;
 }
 
@@ -426,13 +455,65 @@ interface AuthenticatedRequest extends Request {
   authUser?: TokenPayload | null;
 }
 
-function getSecret(): string {
-  if (fs.existsSync(SECRET_PATH)) {
-    return fs.readFileSync(SECRET_PATH, 'utf8').trim();
+function hashPassword(plain: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(plain, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+function verifyPassword(plain: string, storedHash?: string): boolean {
+  if (!plain || !storedHash || typeof storedHash !== 'string') return false;
+  const parts = storedHash.split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, hashHex] = parts;
+  if (!salt || !hashHex) return false;
+  try {
+    const expectedBuf = Buffer.from(hashHex, 'hex');
+    const derivedBuf = crypto.scryptSync(plain, salt, expectedBuf.length, {
+      N: 16384,
+      r: 8,
+      p: 1,
+    });
+    if (expectedBuf.length !== derivedBuf.length) return false;
+    return crypto.timingSafeEqual(expectedBuf, derivedBuf);
+  } catch {
+    return false;
   }
-  const secret = crypto.randomBytes(32).toString('hex');
-  fs.writeFileSync(SECRET_PATH, secret, 'utf8');
-  return secret;
+}
+
+function appendCredentialAudit(
+  db: LeagueDatabase,
+  entry: Omit<CredentialAuditEntry, 'id' | 'createdAt'>
+): void {
+  if (!Array.isArray(db.credentialAuditLog)) {
+    db.credentialAuditLog = [];
+  }
+  db.credentialAuditLog.unshift({
+    id: `aud_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    ...entry,
+    createdAt: new Date().toISOString(),
+  });
+  if (db.credentialAuditLog.length > 200) {
+    db.credentialAuditLog = db.credentialAuditLog.slice(0, 200);
+  }
+}
+
+function getSecret(): string {
+  const envSecret = (process.env.AUTH_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (envSecret) {
+    return envSecret;
+  }
+  try {
+    if (fs.existsSync(SECRET_PATH)) {
+      const existing = fs.readFileSync(SECRET_PATH, 'utf8').trim();
+      if (existing) return existing;
+    }
+    const secret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(SECRET_PATH, secret, 'utf8');
+    return secret;
+  } catch {
+    return crypto.randomBytes(32).toString('hex');
+  }
 }
 
 const SERVER_SECRET = getSecret();
@@ -802,7 +883,10 @@ function createInitialDb(): LeagueDatabase {
   const seededTeams: Team[] = [
     {
       id: 'ADM01',
-      clave: 'admin2026',
+      claveHash: hashPassword('admin2026'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'The Den FC (Admin)',
       memberName: 'Administrador',
       crestUrl: '/api/crest/ADM01.svg',
@@ -813,7 +897,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA01',
-      clave: 'pes601',
+      claveHash: hashPassword('pes601'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Boca Juniors',
       memberName: 'ElPipa_10',
       crestUrl: '/api/crest/LMA01.svg',
@@ -824,7 +911,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA02',
-      clave: 'pes602',
+      claveHash: hashPassword('pes602'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'River Plate',
       memberName: 'Millo_PES6',
       crestUrl: '/api/crest/LMA02.svg',
@@ -835,7 +925,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA03',
-      clave: 'pes603',
+      claveHash: hashPassword('pes603'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Racing Club',
       memberName: 'LaAcade99',
       crestUrl: '/api/crest/LMA03.svg',
@@ -846,7 +939,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA04',
-      clave: 'pes604',
+      claveHash: hashPassword('pes604'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Independiente',
       memberName: 'RojoRey7',
       crestUrl: '/api/crest/LMA04.svg',
@@ -857,7 +953,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA05',
-      clave: 'pes605',
+      claveHash: hashPassword('pes605'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'San Lorenzo',
       memberName: 'CuervoBoedo',
       crestUrl: '/api/crest/LMA05.svg',
@@ -868,7 +967,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA06',
-      clave: 'pes606',
+      claveHash: hashPassword('pes606'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Juventus',
       memberName: 'Tano_DelPiero',
       crestUrl: '/api/crest/LMA06.svg',
@@ -879,7 +981,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA07',
-      clave: 'pes607',
+      claveHash: hashPassword('pes607'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'AC Milan',
       memberName: 'Kaka_22Arg',
       crestUrl: '/api/crest/LMA07.svg',
@@ -890,7 +995,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA08',
-      clave: 'pes608',
+      claveHash: hashPassword('pes608'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Real Madrid',
       memberName: 'Merengue_Sur',
       crestUrl: '/api/crest/LMA08.svg',
@@ -901,7 +1009,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA09',
-      clave: 'pes609',
+      claveHash: hashPassword('pes609'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'FC Barcelona',
       memberName: 'Pulga_D10S',
       crestUrl: '/api/crest/LMA09.svg',
@@ -912,7 +1023,10 @@ function createInitialDb(): LeagueDatabase {
     },
     {
       id: 'LMA10',
-      clave: 'pes610',
+      claveHash: hashPassword('pes610'),
+      accountStatus: 'active',
+      tokenVersion: 1,
+      credentialsUpdatedAt: now,
       name: 'Estudiantes LP',
       memberName: 'Pincha_Bilardo',
       crestUrl: '/api/crest/LMA10.svg',
@@ -1017,7 +1131,8 @@ function createInitialDb(): LeagueDatabase {
       coverUrl: '/assets/aistudio/cabra_copa_3d_hd.jpg',
       faviconUrl: '/assets/aistudio/Liga_Master_Argentina__F_tbol_de__lite_eeeab9aa.png',
       adminId: 'ADMI',
-      adminClave: 'LMA2026',
+      adminClaveHash: hashPassword('LMA2026'),
+      adminTokenVersion: 1,
       adminTeamId: 'ADM01',
       backupGmail: 'cristiandiazdevelez@gmail.com',
       radioName: 'FM 101.5 Pop Radio (Bs. As.)',
@@ -1119,13 +1234,14 @@ function createInitialDb(): LeagueDatabase {
     ],
     calendarEvents: [],
     cup: createInitialCup(1, seededTeams, seededTeams[1] || seededTeams[0]),
+    credentialAuditLog: [],
   };
 }
 
 function loadDb(): LeagueDatabase {
   if (!fs.existsSync(DB_PATH)) {
     const initial = createInitialDb();
-    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf8');
+    saveDb(initial);
     return initial;
   }
   try {
@@ -1136,6 +1252,49 @@ function loadDb(): LeagueDatabase {
     if (parsed.settings.adminId === 'ADMIN' && parsed.settings.adminClave === 'admin2026') {
       parsed.settings.adminId = 'ADMI';
       parsed.settings.adminClave = 'LMA2026';
+      migrated = true;
+    }
+
+    // Migrate legacy plaintext admin password to scrypt hash and erase plaintext
+    if (!parsed.settings.adminClaveHash) {
+      const legacyAdminPlain = String(parsed.settings.adminClave || 'LMA2026').trim() || 'LMA2026';
+      parsed.settings.adminClaveHash = hashPassword(legacyAdminPlain);
+      migrated = true;
+    }
+    if ('adminClave' in parsed.settings) {
+      delete parsed.settings.adminClave;
+      migrated = true;
+    }
+    if (typeof parsed.settings.adminTokenVersion !== 'number') {
+      parsed.settings.adminTokenVersion = 1;
+      migrated = true;
+    }
+
+    // Migrate legacy plaintext participant passwords to scrypt hashes and erase plaintext
+    if (Array.isArray(parsed.teams)) {
+      for (const t of parsed.teams) {
+        if (!t.claveHash) {
+          const legacyMemberPlain = String(t.clave || t.id.toLowerCase()).trim() || t.id.toLowerCase();
+          t.claveHash = hashPassword(legacyMemberPlain);
+          migrated = true;
+        }
+        if ('clave' in t) {
+          delete t.clave;
+          migrated = true;
+        }
+        if (t.accountStatus !== 'active' && t.accountStatus !== 'blocked') {
+          t.accountStatus = 'active';
+          migrated = true;
+        }
+        if (typeof t.tokenVersion !== 'number') {
+          t.tokenVersion = 1;
+          migrated = true;
+        }
+      }
+    }
+
+    if (!Array.isArray(parsed.credentialAuditLog)) {
+      parsed.credentialAuditLog = [];
       migrated = true;
     }
     if (
@@ -1838,6 +1997,17 @@ function broadcastDbUpdate(): void {
 }
 
 function saveDb(db: LeagueDatabase): void {
+  // Defense-in-depth: never persist plaintext passwords to disk
+  if (db.settings && 'adminClave' in db.settings) {
+    delete db.settings.adminClave;
+  }
+  if (Array.isArray(db.teams)) {
+    for (const t of db.teams) {
+      if ('clave' in t) {
+        delete t.clave;
+      }
+    }
+  }
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
   broadcastDbUpdate();
 }
@@ -1856,7 +2026,16 @@ function sanitizeTeam(team: Team) {
     celebrationImageUrl: team.celebrationStatus === 'rejected' ? undefined : team.celebrationImageUrl,
     celebrationStatus: team.celebrationStatus,
     celebrationUploadedAt: team.celebrationUploadedAt,
+    accountStatus: team.accountStatus === 'blocked' ? ('blocked' as const) : ('active' as const),
     createdAt: team.createdAt,
+  };
+}
+
+function sanitizeAdminTeam(team: Team) {
+  return {
+    ...sanitizeTeam(team),
+    hasPassword: Boolean(team.claveHash),
+    credentialsUpdatedAt: team.credentialsUpdatedAt || team.createdAt,
   };
 }
 
@@ -1892,18 +2071,42 @@ function extractAuth(req: AuthenticatedRequest, _res: Response, next: NextFuncti
     if (parsed) {
       const db = loadDb();
       if (parsed.role === 'admin') {
+        const currentAdminId = String(db.settings.adminId || 'ADMI').trim();
+        const expectedVersion = db.settings.adminTokenVersion ?? 1;
+        if (
+          String(parsed.id || '').trim().toUpperCase() !== currentAdminId.toUpperCase() ||
+          (parsed.tokenVersion ?? 1) !== expectedVersion
+        ) {
+          req.authUser = null;
+          next();
+          return;
+        }
         const adminTeam = db.teams.find((t) => t.id === db.settings.adminTeamId);
-        parsed.id = db.settings.adminId;
+        parsed.id = currentAdminId;
         parsed.teamId = adminTeam?.id;
         parsed.displayName = adminTeam
           ? `${adminTeam.memberName} (${adminTeam.name})`
           : 'Administrador General';
       } else if (parsed.role === 'member') {
         const memberTeam = db.teams.find((t) => t.id === (parsed.teamId || parsed.id));
-        if (memberTeam) {
-          parsed.teamId = memberTeam.id;
-          parsed.displayName = `${memberTeam.memberName} (${memberTeam.name})`;
+        const currentAdminId = String(db.settings.adminId || 'ADMI').trim().toUpperCase();
+        if (
+          !memberTeam ||
+          memberTeam.accountStatus === 'blocked' ||
+          memberTeam.id.toUpperCase() === currentAdminId ||
+          (parsed.tokenVersion ?? 1) !== (memberTeam.tokenVersion ?? 1)
+        ) {
+          req.authUser = null;
+          next();
+          return;
         }
+        parsed.id = memberTeam.id;
+        parsed.teamId = memberTeam.id;
+        parsed.displayName = `${memberTeam.memberName} (${memberTeam.name})`;
+      } else {
+        req.authUser = null;
+        next();
+        return;
       }
     }
     req.authUser = parsed;
@@ -1915,7 +2118,7 @@ function extractAuth(req: AuthenticatedRequest, _res: Response, next: NextFuncti
 
 function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
   if (!req.authUser) {
-    res.status(401).json({ error: 'Debés iniciar sesión con tu ID y Clave.' });
+    res.status(401).json({ error: 'Debés iniciar sesión con tu ID y contraseña válidos.' });
     return;
   }
   next();
@@ -2163,6 +2366,32 @@ async function ensurePlayableMp4(inputPath: string, ext: string): Promise<string
 async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
+
+  // Normalize /Liga-Master-Argentina-PES6/api/* to /api/* and enable CORS for API calls
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.url === '/Liga-Master-Argentina-PES6/api' ||
+      req.url.startsWith('/Liga-Master-Argentina-PES6/api/') ||
+      req.url.startsWith('/Liga-Master-Argentina-PES6/api?')
+    ) {
+      req.url = req.url.slice('/Liga-Master-Argentina-PES6'.length);
+    }
+
+    if (req.url === '/api' || req.url.startsWith('/api/') || req.url.startsWith('/api?')) {
+      const origin = req.headers.origin;
+      res.setHeader('Access-Control-Allow-Origin', origin || '*');
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+
+    next();
+  });
+
   app.use(express.json({ limit: '5mb' }));
   app.use(extractAuth);
 
@@ -2267,16 +2496,11 @@ async function startServer() {
       ? allComments
       : allComments.filter((c) => c.status === 'approved');
 
-    const ownClave =
-      req.authUser?.role === 'member' && userTeamId
-        ? db.teams.find((t) => t.id === userTeamId)?.clave
-        : undefined;
-
     res.json({
       settings: sanitizeSettings(db.settings, isAdmin),
       teams: db.teams.map(sanitizeTeam),
-      adminTeams: isAdmin ? db.teams : undefined,
-      ownClave,
+      adminTeams: isAdmin ? db.teams.map(sanitizeAdminTeam) : undefined,
+      credentialAuditLog: isAdmin ? (db.credentialAuditLog || []) : undefined,
       matches: safeMatches,
       fixtures: db.fixtures || [],
       calendarEvents: db.calendarEvents || [],
@@ -2327,36 +2551,89 @@ async function startServer() {
     }
   }
 
-  // Auth login (Admin or Member by ID + Clave)
-  app.post('/api/auth/login', async (req: Request, res: Response) => {
-    const id = String(req.body?.id || '').trim();
-    const clave = String(req.body?.clave || '').trim();
+  const loginRateLimiter = new Map<string, { count: number; resetAt: number }>();
 
-    if (!id || !clave) {
-      res.status(400).json({ error: 'Ingresá tu ID y Clave.' });
-      return;
+  function checkLoginRateLimit(req: Request, maxAttempts = 25): boolean {
+    const ip = String(req.ip || req.socket.remoteAddress || 'unknown');
+    const now = Date.now();
+    const record = loginRateLimiter.get(ip);
+    if (!record || record.resetAt < now) {
+      loginRateLimiter.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
+      return true;
     }
+    if (record.count >= maxAttempts) {
+      return false;
+    }
+    record.count += 1;
+    return true;
+  }
 
-    const db = loadDb();
-
-    if (id.toUpperCase() === db.settings.adminId.toUpperCase()) {
-      let authorized = clave === db.settings.adminClave;
-      if (!authorized && db.settings.backupGmail) {
-        const firebaseVerified = await verifyFirebaseEmailPassword(db.settings.backupGmail, clave);
-        if (firebaseVerified) {
-          db.settings.adminClave = clave;
-          saveDb(db);
-          authorized = true;
-        }
+  // Auth login (Admin or Member by ID + Password verified against scrypt hashes)
+  app.post('/api/auth/login', async (req: Request, res: Response) => {
+    try {
+      if (!checkLoginRateLimit(req, 25)) {
+        res.status(429).json({
+          error: 'Demasiados intentos de ingreso. Esperá unos minutos antes de reintentar.',
+        });
+        return;
       }
 
-      if (authorized) {
-        const adminTeam = db.teams.find((t) => t.id === db.settings.adminTeamId);
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const id = String((body as { id?: unknown }).id || '').trim();
+      const clave = String((body as { clave?: unknown }).clave || '').trim();
+
+      if (!id || !clave) {
+        res.status(400).json({ error: 'Ingresá tu ID de usuario y contraseña.' });
+        return;
+      }
+
+      const db = loadDb();
+      const teams = Array.isArray(db.teams) ? db.teams : [];
+      const configuredAdminId = String(db.settings?.adminId || 'ADMI').trim();
+
+      if (id.toUpperCase() === configuredAdminId.toUpperCase()) {
+        let authorized = verifyPassword(clave, db.settings?.adminClaveHash);
+        if (!authorized && db.settings?.backupGmail) {
+          const firebaseVerified = await verifyFirebaseEmailPassword(
+            db.settings.backupGmail,
+            clave
+          );
+          if (firebaseVerified) {
+            db.settings.adminClaveHash = hashPassword(clave);
+            db.settings.adminTokenVersion = (db.settings.adminTokenVersion ?? 1) + 1;
+            appendCredentialAudit(db, {
+              action: 'admin_firebase_password_reset',
+              targetType: 'admin',
+              targetId: configuredAdminId,
+              targetLabel: 'Administrador General',
+              details: 'Contraseña de Administrador sincronizada desde Firebase Authentication.',
+              performedBy: configuredAdminId,
+            });
+            try {
+              saveDb(db);
+            } catch (saveErr) {
+              console.error('Warning saving synced adminClaveHash:', saveErr);
+            }
+            authorized = true;
+          }
+        }
+
+        if (!authorized) {
+          res.status(401).json({
+            error: 'ID de usuario o contraseña incorrectos.',
+          });
+          return;
+        }
+
+        const adminTeam = teams.find((t) => t.id === db.settings?.adminTeamId);
         const payload: TokenPayload = {
           role: 'admin',
-          id: db.settings.adminId,
-          displayName: adminTeam ? `${adminTeam.memberName} (${adminTeam.name})` : 'Administrador General',
+          id: configuredAdminId,
+          displayName: adminTeam
+            ? `${adminTeam.memberName} (${adminTeam.name})`
+            : 'Administrador General',
           teamId: adminTeam?.id,
+          tokenVersion: db.settings?.adminTokenVersion ?? 1,
           exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
         };
         res.json({
@@ -2370,32 +2647,52 @@ async function startServer() {
         });
         return;
       }
-    }
 
-    const team = db.teams.find(
-      (t) => t.id.toUpperCase() === id.toUpperCase() && t.clave === clave
-    );
-    if (!team) {
-      res.status(401).json({ error: 'ID o Clave incorrectos. Verificá los datos con el Administrador.' });
-      return;
-    }
+      const team = teams.find(
+        (t) => String(t?.id || '').trim().toUpperCase() === id.toUpperCase()
+      );
+      if (!team || !verifyPassword(clave, team.claveHash)) {
+        res.status(401).json({
+          error: 'ID de usuario o contraseña incorrectos. Solicitá tus credenciales al Administrador.',
+        });
+        return;
+      }
 
-    const payload: TokenPayload = {
-      role: 'member',
-      id: team.id,
-      displayName: `${team.memberName} (${team.name})`,
-      teamId: team.id,
-      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
-    };
-    res.json({
-      token: signToken(payload),
-      user: {
-        role: payload.role,
-        id: payload.id,
-        displayName: payload.displayName,
-        teamId: payload.teamId,
-      },
-    });
+      if (team.accountStatus === 'blocked') {
+        res.status(403).json({
+          error: 'Tu cuenta fue bloqueada por el Administrador. Contactate con la administración para reactivarla.',
+        });
+        return;
+      }
+
+      const payload: TokenPayload = {
+        role: 'member',
+        id: team.id,
+        displayName: `${team.memberName} (${team.name})`,
+        teamId: team.id,
+        tokenVersion: team.tokenVersion ?? 1,
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+      };
+      res.json({
+        token: signToken(payload),
+        user: {
+          role: payload.role,
+          id: payload.id,
+          displayName: payload.displayName,
+          teamId: payload.teamId,
+        },
+      });
+    } catch (err) {
+      console.error('Error in /api/auth/login:', err);
+      const detail = err instanceof Error ? err.message : 'Error interno del servidor.';
+      res.status(500).json({
+        error: `No se pudo procesar el inicio de sesión en el servidor (${detail}).`,
+      });
+    }
+  });
+
+  app.post('/api/auth/logout', (_req: Request, res: Response) => {
+    res.json({ ok: true });
   });
 
   const resetRateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -2506,14 +2803,23 @@ async function startServer() {
         return;
       }
 
-      db.settings.adminClave = newClave;
+      db.settings.adminClaveHash = hashPassword(newClave);
+      db.settings.adminTokenVersion = (db.settings.adminTokenVersion ?? 1) + 1;
+      appendCredentialAudit(db, {
+        action: 'admin_firebase_password_reset',
+        targetType: 'admin',
+        targetId: db.settings.adminId,
+        targetLabel: 'Administrador General',
+        details: 'Contraseña de Administrador restablecida mediante correo de recuperación oficial.',
+        performedBy: db.settings.adminId,
+      });
       saveDb(db);
 
       res.json({
         ok: true,
         adminId: db.settings.adminId,
         message:
-          '¡OK! Todo listo. Tu nueva contraseña de Administrador fue guardada y ya podés iniciar sesión normalmente en Ingresar a Cuenta.',
+          '¡OK! Todo listo. Tu nueva contraseña de Administrador fue guardada de forma segura y ya podés ingresar con tu ID y nueva contraseña.',
       });
     } catch (err) {
       console.error('Error syncing Firebase admin password:', err);
@@ -2521,7 +2827,7 @@ async function startServer() {
     }
   });
 
-  // Member updates own bio
+  // Member updates own bio (cannot modify ID or password)
   app.patch('/api/profile', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const db = loadDb();
     const teamId = req.authUser?.teamId;
@@ -2881,7 +3187,10 @@ async function startServer() {
 
         team = {
           id: candidate,
-          clave: db.settings.adminClave || 'admin2026',
+          claveHash: db.settings.adminClaveHash || hashPassword('admin2026'),
+          accountStatus: 'active',
+          tokenVersion: 1,
+          credentialsUpdatedAt: new Date().toISOString(),
           name,
           memberName,
           crestUrl,
@@ -2909,7 +3218,7 @@ async function startServer() {
     }
   );
 
-  // Admin: update site settings (title, subtitle, bannerText, admin credentials, optional crest/cover PNG/JPG)
+  // Admin: update site branding/settings (Admin credentials are updated strictly via PUT /api/admin/credentials)
   app.put(
     '/api/admin/settings',
     requireAdmin,
@@ -2922,18 +3231,13 @@ async function startServer() {
     (req: AuthenticatedRequest, res: Response) => {
       const db = loadDb();
       const files = req.files as Record<string, Express.Multer.File[]> | undefined;
-      const { title, subtitle, description, calendarMessage, bannerText, adminId, adminClave, adminTeamId, backupGmail, radioName, radioStreamUrl } = req.body as Record<string, string>;
+      const { title, subtitle, description, calendarMessage, bannerText, adminTeamId, radioName, radioStreamUrl } = req.body as Record<string, string>;
 
       if (title?.trim()) db.settings.title = title.trim();
       if (typeof subtitle === 'string') db.settings.subtitle = subtitle.trim();
       if (typeof description === 'string') db.settings.description = description.trim();
       if (typeof calendarMessage === 'string') db.settings.calendarMessage = calendarMessage.trim().slice(0, 600);
       if (typeof bannerText === 'string') db.settings.bannerText = bannerText.trim();
-      if (adminId?.trim()) db.settings.adminId = adminId.trim();
-      if (adminClave?.trim()) db.settings.adminClave = adminClave.trim();
-      if (typeof backupGmail === 'string') {
-        db.settings.backupGmail = backupGmail.trim();
-      }
       if (typeof radioName === 'string' && radioName.trim()) {
         db.settings.radioName = radioName.trim();
       }
@@ -2963,7 +3267,137 @@ async function startServer() {
     }
   );
 
-  // Admin: create team (max 30 teams, optional PNG 128x128 crest)
+  // Admin: dedicated verified credentials management (requires currentPassword, prevents losing Admin access)
+  app.put('/api/admin/credentials', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const db = loadDb();
+    const currentPassword = String(req.body?.currentPassword || '').trim();
+    const rawNextAdminId = String(req.body?.nextAdminId ?? db.settings.adminId).trim().toUpperCase();
+    const nextPassword = String(req.body?.nextPassword || '').trim();
+    const confirmPassword = String(req.body?.confirmPassword || '').trim();
+    const nextBackupGmail = String(req.body?.nextBackupGmail ?? db.settings.backupGmail ?? '')
+      .trim()
+      .toLowerCase();
+
+    if (!currentPassword) {
+      res.status(400).json({
+        error: 'Por seguridad, ingresá tu contraseña actual de Administrador para confirmar los cambios.',
+      });
+      return;
+    }
+
+    if (!verifyPassword(currentPassword, db.settings.adminClaveHash)) {
+      res.status(401).json({
+        error: 'Verificación fallida: la contraseña actual del Administrador no es correcta.',
+      });
+      return;
+    }
+
+    if (!/^[A-Z0-9_-]{3,20}$/.test(rawNextAdminId)) {
+      res.status(400).json({
+        error: 'El ID del Administrador debe tener entre 3 y 20 caracteres alfanuméricos (letras, números, - o _).',
+      });
+      return;
+    }
+
+    if (db.teams.some((t) => t.id.toUpperCase() === rawNextAdminId)) {
+      res.status(409).json({
+        error: `El ID "${rawNextAdminId}" pertenece a un participante. Elegí un ID exclusivo para el Administrador para evitar conflictos de acceso.`,
+      });
+      return;
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextBackupGmail)) {
+      res.status(400).json({
+        error: 'Ingresá un correo electrónico de recuperación válido. Es obligatorio mantener un correo de respaldo activo.',
+      });
+      return;
+    }
+
+    if (nextPassword) {
+      if (nextPassword.length < 6 || nextPassword.length > 64) {
+        res.status(400).json({
+          error: 'La nueva contraseña del Administrador debe tener entre 6 y 64 caracteres.',
+        });
+        return;
+      }
+      if (nextPassword !== confirmPassword) {
+        res.status(400).json({
+          error: 'La nueva contraseña y su confirmación no coinciden.',
+        });
+        return;
+      }
+      if (nextPassword.toUpperCase() === rawNextAdminId) {
+        res.status(400).json({
+          error: 'Por seguridad, la contraseña no puede ser igual a tu ID de Administrador.',
+        });
+        return;
+      }
+    }
+
+    const changedParts: string[] = [];
+    const oldAdminId = db.settings.adminId;
+    if (rawNextAdminId !== oldAdminId.toUpperCase()) {
+      db.settings.adminId = rawNextAdminId;
+      changedParts.push(`ID (${oldAdminId} → ${rawNextAdminId})`);
+    } else {
+      db.settings.adminId = rawNextAdminId;
+    }
+
+    if (nextBackupGmail !== String(db.settings.backupGmail || '').trim().toLowerCase()) {
+      db.settings.backupGmail = nextBackupGmail;
+      changedParts.push('correo de recuperación');
+    }
+
+    if (nextPassword) {
+      db.settings.adminClaveHash = hashPassword(nextPassword);
+      changedParts.push('contraseña administrativa');
+    }
+
+    if (changedParts.length === 0) {
+      res.status(400).json({
+        error: 'No se detectaron cambios en las credenciales del Administrador.',
+      });
+      return;
+    }
+
+    db.settings.adminTokenVersion = (db.settings.adminTokenVersion ?? 1) + 1;
+    appendCredentialAudit(db, {
+      action: 'update_admin_credentials',
+      targetType: 'admin',
+      targetId: db.settings.adminId,
+      targetLabel: 'Administrador General',
+      details: `Actualización verificada de: ${changedParts.join(', ')}.`,
+      performedBy: oldAdminId,
+    });
+
+    saveDb(db);
+
+    const adminTeam = db.teams.find((t) => t.id === db.settings.adminTeamId);
+    const nextPayload: TokenPayload = {
+      role: 'admin',
+      id: db.settings.adminId,
+      displayName: adminTeam
+        ? `${adminTeam.memberName} (${adminTeam.name})`
+        : 'Administrador General',
+      teamId: adminTeam?.id,
+      tokenVersion: db.settings.adminTokenVersion,
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    };
+
+    res.json({
+      token: signToken(nextPayload),
+      user: {
+        role: nextPayload.role,
+        id: nextPayload.id,
+        displayName: nextPayload.displayName,
+        teamId: nextPayload.teamId,
+      },
+      settings: sanitizeSettings(db.settings, true),
+      credentialAuditLog: db.credentialAuditLog || [],
+    });
+  });
+
+  // Admin: create participant (hashed password, unique ID, default active status, audit logged)
   app.post(
     '/api/admin/teams',
     requireAdmin,
@@ -2971,21 +3405,22 @@ async function startServer() {
     async (req: AuthenticatedRequest, res: Response) => {
       const db = loadDb();
       if (db.teams.length >= db.settings.maxTeams) {
+        if (req.file) fs.unlinkSync(req.file.path);
         res.status(400).json({
-          error: `Se alcanzó el límite máximo de ${db.settings.maxTeams} equipos en la liga.`,
+          error: `Se alcanzó el límite máximo de ${db.settings.maxTeams} participantes en la liga.`,
         });
         return;
       }
 
-      const memberName = String(req.body?.memberName || '').trim();
+      const memberName = String(req.body?.memberName || '').trim().slice(0, 60);
       const rawId = String(req.body?.id || '').trim().toUpperCase();
       const rawClave = String(req.body?.clave || '').trim();
-      const rawName = String(req.body?.name || '').trim();
-      const bio = String(req.body?.bio || '').trim();
+      const rawName = String(req.body?.name || '').trim().slice(0, 60);
+      const bio = String(req.body?.bio || '').trim().slice(0, 240);
 
       if (!memberName) {
         if (req.file) fs.unlinkSync(req.file.path);
-        res.status(400).json({ error: 'Completá al menos el Nombre del Miembro.' });
+        res.status(400).json({ error: 'Completá al menos el Nombre del Participante.' });
         return;
       }
 
@@ -2998,9 +3433,24 @@ async function startServer() {
           nextNum += 1;
           id = `LMA${String(nextNum).padStart(2, '0')}`;
         }
+      } else if (!/^[A-Z0-9_-]{2,20}$/.test(id)) {
+        if (req.file) fs.unlinkSync(req.file.path);
+        res.status(400).json({
+          error: 'El ID del participante debe tener entre 2 y 20 caracteres alfanuméricos (letras, números, - o _).',
+        });
+        return;
       }
 
-      const clave = rawClave || `pes6_${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+      const initialPassword =
+        rawClave || `PES6_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+      if (initialPassword.length < 4 || initialPassword.length > 64) {
+        if (req.file) fs.unlinkSync(req.file.path);
+        res.status(400).json({
+          error: 'La contraseña inicial debe tener entre 4 y 64 caracteres.',
+        });
+        return;
+      }
+
       const name = rawName || `Club ${memberName}`;
 
       if (id === db.settings.adminId.toUpperCase()) {
@@ -3011,7 +3461,7 @@ async function startServer() {
 
       if (db.teams.some((t) => t.id.toUpperCase() === id)) {
         if (req.file) fs.unlinkSync(req.file.path);
-        res.status(409).json({ error: `Ya existe un equipo con el ID "${id}".` });
+        res.status(409).json({ error: `Ya existe un participante con el ID "${id}".` });
         return;
       }
 
@@ -3026,25 +3476,41 @@ async function startServer() {
         crestUrl = `/uploads/crests/${finalName}`;
       }
 
+      const now = new Date().toISOString();
       const newTeam: Team = {
         id,
-        clave,
+        claveHash: hashPassword(initialPassword),
+        accountStatus: 'active',
+        tokenVersion: 1,
+        credentialsUpdatedAt: now,
         name,
         memberName,
         crestUrl,
         bio,
         primaryColor: '#0284C7',
         secondaryColor: '#FFFFFF',
-        createdAt: new Date().toISOString(),
+        createdAt: now,
       };
 
       db.teams.push(newTeam);
+      appendCredentialAudit(db, {
+        action: 'create_participant',
+        targetType: 'participant',
+        targetId: newTeam.id,
+        targetLabel: `${newTeam.memberName} (${newTeam.name})`,
+        details: `Participante creado con ID ${newTeam.id} y contraseña inicial cifrada (hash).`,
+        performedBy: req.authUser?.id || db.settings.adminId,
+      });
+
       saveDb(db);
-      res.status(201).json({ team: newTeam });
+      res.status(201).json({
+        team: sanitizeAdminTeam(newTeam),
+        generatedClave: rawClave ? undefined : initialPassword,
+      });
     }
   );
 
-  // Admin: update existing team (can change id, clave, name, memberName, bio, 128x128 PNG crest)
+  // Admin: update existing participant (ID, optional new password reset, team name, memberName, bio, status, crest)
   app.put(
     '/api/admin/teams/:teamId',
     requireAdmin,
@@ -3054,15 +3520,18 @@ async function startServer() {
       const targetId = String(req.params.teamId || '');
       const team = db.teams.find((t) => t.id === targetId);
       if (!team) {
-        res.status(404).json({ error: 'Equipo no encontrado.' });
+        if (req.file) fs.unlinkSync(req.file.path);
+        res.status(404).json({ error: 'Participante no encontrado.' });
         return;
       }
 
       const oldId = team.id;
       const nextId = String(req.body?.id ?? team.id).trim().toUpperCase();
-      if (!nextId) {
+      if (!nextId || !/^[A-Z0-9_-]{2,20}$/.test(nextId)) {
         if (req.file) fs.unlinkSync(req.file.path);
-        res.status(400).json({ error: 'El ID del miembro no puede quedar vacío.' });
+        res.status(400).json({
+          error: 'El ID del participante debe tener entre 2 y 20 caracteres alfanuméricos (letras, números, - o _).',
+        });
         return;
       }
       if (nextId === db.settings.adminId.toUpperCase()) {
@@ -3076,9 +3545,12 @@ async function startServer() {
         return;
       }
 
-      if (typeof req.body?.clave === 'string' && !req.body.clave.trim()) {
+      const nextPassword = typeof req.body?.clave === 'string' ? req.body.clave.trim() : '';
+      if (nextPassword && (nextPassword.length < 4 || nextPassword.length > 64)) {
         if (req.file) fs.unlinkSync(req.file.path);
-        res.status(400).json({ error: 'La clave del miembro no puede quedar vacía.' });
+        res.status(400).json({
+          error: 'La nueva contraseña debe tener entre 4 y 64 caracteres (o dejá el campo vacío para mantener la actual).',
+        });
         return;
       }
 
@@ -3092,15 +3564,36 @@ async function startServer() {
         team.crestUrl = `/uploads/crests/${finalName}`;
       }
 
-      // If ID changed, update match, adminTeamId, and champion references too
+      const now = new Date().toISOString();
+      const adminActor = req.authUser?.id || db.settings.adminId;
+
+      // If ID changed, update all league references atomically and bump tokenVersion
       if (nextId !== oldId) {
         for (const m of db.matches) {
           if (m.homeTeamId === oldId) m.homeTeamId = nextId;
           if (m.awayTeamId === oldId) m.awayTeamId = nextId;
           if (m.submittedByTeamId === oldId) m.submittedByTeamId = nextId;
         }
+        for (const fx of db.fixtures || []) {
+          if (fx.homeTeamId === oldId) fx.homeTeamId = nextId;
+          if (fx.awayTeamId === oldId) fx.awayTeamId = nextId;
+        }
+        for (const ev of db.calendarEvents || []) {
+          if (ev.homeTeamId === oldId) ev.homeTeamId = nextId;
+          if (ev.awayTeamId === oldId) ev.awayTeamId = nextId;
+        }
+        for (const cl of db.claims || []) {
+          if (cl.reporterTeamId === oldId) cl.reporterTeamId = nextId;
+          if (cl.accusedTeamId === oldId) cl.accusedTeamId = nextId;
+        }
+        for (const cm of db.comments || []) {
+          if (cm.authorTeamId === oldId) cm.authorTeamId = nextId;
+        }
         for (const c of db.champions) {
           if (c.teamId === oldId) c.teamId = nextId;
+        }
+        for (const p of db.cup?.participants || []) {
+          if (p.teamId === oldId) p.teamId = nextId;
         }
         if (db.settings.adminTeamId === oldId) {
           db.settings.adminTeamId = nextId;
@@ -3109,40 +3602,179 @@ async function startServer() {
           team.crestUrl = `/api/crest/${encodeURIComponent(nextId)}.svg`;
         }
         team.id = nextId;
+        team.tokenVersion = (team.tokenVersion ?? 1) + 1;
+        team.credentialsUpdatedAt = now;
+        appendCredentialAudit(db, {
+          action: 'update_participant_id',
+          targetType: 'participant',
+          targetId: nextId,
+          targetLabel: `${team.memberName} (${team.name})`,
+          details: `ID modificado de ${oldId} a ${nextId} (sesión anterior revocada).`,
+          performedBy: adminActor,
+        });
       }
 
-      if (typeof req.body?.clave === 'string' && req.body.clave.trim()) {
-        team.clave = req.body.clave.trim();
+      if (nextPassword) {
+        team.claveHash = hashPassword(nextPassword);
+        team.tokenVersion = (team.tokenVersion ?? 1) + 1;
+        team.credentialsUpdatedAt = now;
+        appendCredentialAudit(db, {
+          action: 'reset_participant_password',
+          targetType: 'participant',
+          targetId: team.id,
+          targetLabel: `${team.memberName} (${team.name})`,
+          details: `Contraseña restablecida y cifrada por el Administrador (sesión anterior revocada).`,
+          performedBy: adminActor,
+        });
       }
+
       if (typeof req.body?.name === 'string' && req.body.name.trim()) {
-        team.name = req.body.name.trim();
+        team.name = req.body.name.trim().slice(0, 60);
       }
       if (typeof req.body?.memberName === 'string' && req.body.memberName.trim()) {
-        team.memberName = req.body.memberName.trim();
+        team.memberName = req.body.memberName.trim().slice(0, 60);
       }
       if (typeof req.body?.bio === 'string') {
-        team.bio = req.body.bio.trim();
+        team.bio = req.body.bio.trim().slice(0, 240);
+      }
+      if (req.body?.accountStatus === 'active' || req.body?.accountStatus === 'blocked') {
+        if (team.accountStatus !== req.body.accountStatus) {
+          team.accountStatus = req.body.accountStatus;
+          team.tokenVersion = (team.tokenVersion ?? 1) + 1;
+          team.credentialsUpdatedAt = now;
+          appendCredentialAudit(db, {
+            action: req.body.accountStatus === 'blocked' ? 'block_participant' : 'activate_participant',
+            targetType: 'participant',
+            targetId: team.id,
+            targetLabel: `${team.memberName} (${team.name})`,
+            details:
+              req.body.accountStatus === 'blocked'
+                ? 'Cuenta bloqueada por el Administrador.'
+                : 'Cuenta activada por el Administrador.',
+            performedBy: adminActor,
+          });
+        }
       }
 
       saveDb(db);
-      res.json({ team });
+      res.json({ team: sanitizeAdminTeam(team) });
     }
   );
 
-  // Admin: delete team
+  // Admin: activate or block participant account (revokes active sessions when blocked)
+  app.patch(
+    '/api/admin/teams/:teamId/status',
+    requireAdmin,
+    (req: AuthenticatedRequest, res: Response) => {
+      const db = loadDb();
+      const targetId = String(req.params.teamId || '');
+      const team = db.teams.find((t) => t.id === targetId);
+      if (!team) {
+        res.status(404).json({ error: 'Participante no encontrado.' });
+        return;
+      }
+
+      const nextStatus =
+        req.body?.status === 'blocked' || req.body?.status === 'active'
+          ? (req.body.status as 'active' | 'blocked')
+          : team.accountStatus === 'blocked'
+          ? 'active'
+          : 'blocked';
+
+      team.accountStatus = nextStatus;
+      team.tokenVersion = (team.tokenVersion ?? 1) + 1;
+      team.credentialsUpdatedAt = new Date().toISOString();
+
+      appendCredentialAudit(db, {
+        action: nextStatus === 'blocked' ? 'block_participant' : 'activate_participant',
+        targetType: 'participant',
+        targetId: team.id,
+        targetLabel: `${team.memberName} (${team.name})`,
+        details:
+          nextStatus === 'blocked'
+            ? 'Cuenta bloqueada por el Administrador; acceso restringido.'
+            : 'Cuenta reactivada por el Administrador.',
+        performedBy: req.authUser?.id || db.settings.adminId,
+      });
+
+      saveDb(db);
+      res.json({ team: sanitizeAdminTeam(team) });
+    }
+  );
+
+  // Admin: reset participant password (custom or generated one-time temporary password)
+  app.post(
+    '/api/admin/teams/:teamId/reset-password',
+    requireAdmin,
+    (req: AuthenticatedRequest, res: Response) => {
+      const db = loadDb();
+      const targetId = String(req.params.teamId || '');
+      const team = db.teams.find((t) => t.id === targetId);
+      if (!team) {
+        res.status(404).json({ error: 'Participante no encontrado.' });
+        return;
+      }
+
+      const requested = String(req.body?.newPassword || '').trim();
+      const generate = req.body?.generate === true || !requested;
+      const nextPlain = generate
+        ? `PES6_${crypto.randomBytes(3).toString('hex').toUpperCase()}`
+        : requested;
+
+      if (nextPlain.length < 4 || nextPlain.length > 64) {
+        res.status(400).json({
+          error: 'La nueva contraseña debe tener entre 4 y 64 caracteres.',
+        });
+        return;
+      }
+
+      team.claveHash = hashPassword(nextPlain);
+      team.tokenVersion = (team.tokenVersion ?? 1) + 1;
+      team.credentialsUpdatedAt = new Date().toISOString();
+
+      appendCredentialAudit(db, {
+        action: 'reset_participant_password',
+        targetType: 'participant',
+        targetId: team.id,
+        targetLabel: `${team.memberName} (${team.name})`,
+        details: generate
+          ? 'Credenciales restablecidas con nueva contraseña aleatoria cifrada.'
+          : 'Contraseña restablecida manualmente por el Administrador.',
+        performedBy: req.authUser?.id || db.settings.adminId,
+      });
+
+      saveDb(db);
+      res.json({
+        team: sanitizeAdminTeam(team),
+        resetPassword: nextPlain,
+      });
+    }
+  );
+
+  // Admin: delete participant account
   app.delete('/api/admin/teams/:teamId', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
     const db = loadDb();
     const targetId = String(req.params.teamId || '');
-    const before = db.teams.length;
-    db.teams = db.teams.filter((t) => t.id !== targetId);
-    if (db.teams.length === before) {
-      res.status(404).json({ error: 'Equipo no encontrado.' });
+    const target = db.teams.find((t) => t.id === targetId);
+    if (!target) {
+      res.status(404).json({ error: 'Participante no encontrado.' });
       return;
     }
+    db.teams = db.teams.filter((t) => t.id !== targetId);
     if (db.settings.adminTeamId === targetId) {
       db.settings.adminTeamId = undefined;
     }
     db.matches = db.matches.filter((m) => m.homeTeamId !== targetId && m.awayTeamId !== targetId);
+
+    appendCredentialAudit(db, {
+      action: 'delete_participant',
+      targetType: 'participant',
+      targetId: target.id,
+      targetLabel: `${target.memberName} (${target.name})`,
+      details: `Cuenta de participante ${target.id} eliminada permanentemente por el Administrador.`,
+      performedBy: req.authUser?.id || db.settings.adminId,
+    });
+
     saveDb(db);
     res.json({ deleted: true });
   });
@@ -5330,10 +5962,21 @@ async function startServer() {
     res.json({ deleted: true });
   });
 
+  // Unmatched /api routes always return JSON (never fall through to HTML 404)
+  app.use('/api', (req: Request, res: Response) => {
+    res.status(404).json({
+      error: `Ruta API no encontrada (${req.method} ${req.originalUrl}).`,
+    });
+  });
+
   // Ensure API errors always return JSON instead of falling through to HTML
   app.use('/api', (err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error('API error:', err);
-    res.status(400).json({ error: err.message || 'Error procesando la solicitud.' });
+    const status =
+      (err as { status?: number; statusCode?: number }).status ||
+      (err as { status?: number; statusCode?: number }).statusCode ||
+      500;
+    res.status(status).json({ error: err.message || 'Error procesando la solicitud en el servidor.' });
   });
 
   // Frontend serving (Vite middleware in dev, static dist in production)
@@ -5342,7 +5985,11 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+        allowedHosts: true,
+        hmr: false,
+        ws: {
+          server: httpServer,
+        },
       },
       appType: 'spa',
     });

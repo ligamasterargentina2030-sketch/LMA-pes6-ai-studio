@@ -58,9 +58,10 @@ export interface LastListenedTrack {
   listenedAt: string;
 }
 
+export type AccountStatus = 'active' | 'blocked';
+
 export interface Team {
   id: string;
-  clave: string;
   name: string;
   memberName: string;
   crestUrl: string;
@@ -72,6 +73,9 @@ export interface Team {
   celebrationImageUrl?: string;
   celebrationStatus?: ModerationStatus;
   celebrationUploadedAt?: string;
+  accountStatus?: AccountStatus;
+  hasPassword?: boolean;
+  credentialsUpdatedAt?: string;
   createdAt: string;
 }
 
@@ -88,6 +92,7 @@ export interface PublicTeam {
   celebrationImageUrl?: string;
   celebrationStatus?: ModerationStatus;
   celebrationUploadedAt?: string;
+  accountStatus?: AccountStatus;
   createdAt: string;
 }
 
@@ -368,10 +373,32 @@ export interface LeagueComment {
   createdAt: string;
 }
 
+export type CredentialAuditAction =
+  | 'create_participant'
+  | 'update_participant_id'
+  | 'reset_participant_password'
+  | 'block_participant'
+  | 'activate_participant'
+  | 'delete_participant'
+  | 'update_admin_credentials'
+  | 'admin_firebase_password_reset';
+
+export interface CredentialAuditEntry {
+  id: string;
+  action: CredentialAuditAction;
+  targetType: 'participant' | 'admin';
+  targetId: string;
+  targetLabel: string;
+  details: string;
+  performedBy: string;
+  createdAt: string;
+}
+
 export interface LeagueBootstrap {
   settings: LeagueSettings;
   teams: PublicTeam[];
   adminTeams?: Team[];
+  credentialAuditLog?: CredentialAuditEntry[];
   matches: Match[];
   fixtures: ScheduledFixture[];
   calendarEvents: CalendarEvent[];
@@ -385,6 +412,5 @@ export interface LeagueBootstrap {
   news?: NewsPost[];
   comments?: LeagueComment[];
   pageLikes?: number;
-  ownClave?: string;
   user: AuthUser | null;
 }

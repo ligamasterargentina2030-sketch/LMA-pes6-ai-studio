@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   collection,
-  onSnapshot,
+  getDocs,
   orderBy,
   query,
   type Timestamp,
-} from 'firebase/firestore';
-import { db, formatFirestoreError, OperationType, testFirestoreConnection } from '../firebase';
+} from 'firebase/firestore/lite';
+import {
+  COMMUNITY_VIDEOS_REFRESH_EVENT,
+  db,
+  formatFirestoreError,
+  OperationType,
+} from '../firebase';
 import type { CommunityVideo } from '../types';
 
 function parseFecha(rawFecha: unknown): { fechaMs: number; fechaLabel: string } {
@@ -45,45 +50,63 @@ export function useCommunityVideos() {
   const [loadingCommunity, setLoadingCommunity] = useState(true);
   const [firestoreError, setFirestoreError] = useState<string | null>(null);
 
-  useEffect(() => {
-    void testFirestoreConnection();
+  const loadVideos = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setLoadingCommunity(false);
+      return;
+    }
 
-    const videosRef = collection(db, 'videos_comunidad');
-    const q = query(videosRef, orderBy('fecha', 'desc'));
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const items: CommunityVideo[] = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data() as {
-            titulo?: string;
-            autor?: string;
-            videoUrl?: string;
-            fecha?: unknown;
-          };
-          const { fechaMs, fechaLabel } = parseFecha(data.fecha);
-          return {
-            id: docSnap.id,
-            titulo: String(data.titulo || 'Video de la comunidad'),
-            autor: String(data.autor || 'Miembro'),
-            videoUrl: String(data.videoUrl || ''),
-            fechaMs,
-            fechaLabel,
-          };
-        });
-        items.sort((a, b) => b.fechaMs - a.fechaMs);
-        setCommunityVideos(items);
-        setLoadingCommunity(false);
-        setFirestoreError(null);
-      },
-      (error) => {
-        setLoadingCommunity(false);
-        setFirestoreError(formatFirestoreError(error, OperationType.LIST, 'videos_comunidad'));
-      }
-    );
-
-    return () => unsubscribe();
+    try {
+      const videosRef = collection(db, 'videos_comunidad');
+      const q = query(videosRef, orderBy('fecha', 'desc'));
+      const snapshot = await getDocs(q);
+      const items: CommunityVideo[] = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as {
+          titulo?: string;
+          autor?: string;
+          videoUrl?: string;
+          fecha?: unknown;
+        };
+        const { fechaMs, fechaLabel } = parseFecha(data.fecha);
+        return {
+          id: docSnap.id,
+          titulo: String(data.titulo || 'Video de la comunidad'),
+          autor: String(data.autor || 'Miembro'),
+          videoUrl: String(data.videoUrl || ''),
+          fechaMs,
+          fechaLabel,
+        };
+      });
+      items.sort((a, b) => b.fechaMs - a.fechaMs);
+      setCommunityVideos(items);
+      setLoadingCommunity(false);
+      setFirestoreError(null);
+    } catch (error) {
+      setLoadingCommunity(false);
+      setFirestoreError(formatFirestoreError(error, OperationType.LIST, 'videos_comunidad'));
+    }
   }, []);
 
-  return { communityVideos, loadingCommunity, firestoreError };
+  useEffect(() => {
+    let active = true;
+    const run = () => {
+      if (active) void loadVideos();
+    };
+
+    run();
+    window.addEventListener(COMMUNITY_VIDEOS_REFRESH_EVENT, run);
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        run();
+      }
+    }, 45000);
+
+    return () => {
+      active = false;
+      window.removeEventListener(COMMUNITY_VIDEOS_REFRESH_EVENT, run);
+      window.clearInterval(intervalId);
+    };
+  }, [loadVideos]);
+
+  return { communityVideos, loadingCommunity, firestoreError, refreshCommunityVideos: loadVideos };
 }

@@ -110,7 +110,7 @@ export function formatFirebaseAuthResetError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err || '');
 
   if (code === 'auth/operation-not-allowed' || msg.includes('OPERATION_NOT_ALLOWED')) {
-    return 'El proveedor Correo/Contraseña todavía no está habilitado en Firebase Authentication (gen-lang-client-0633763708). Habilitalo en Firebase Console → Authentication → Sign-in method → Email/Password.';
+    return `El proveedor Correo/Contraseña todavía no está habilitado en Firebase Authentication (${firebaseAppletConfig.projectId}). Habilitalo en Firebase Console → Authentication → Sign-in method → Email/Password.`;
   }
   if (code === 'auth/unauthorized-continue-uri' || msg.includes('UNAUTHORIZED_DOMAIN')) {
     return 'El dominio de redirección no está autorizado en Firebase Authentication. Agregalo en Firebase Console → Authentication → Settings → Authorized domains.';

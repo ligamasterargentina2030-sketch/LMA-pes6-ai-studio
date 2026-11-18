@@ -6,7 +6,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
-    base: '/Liga-Master-Argentina-PES6/',
+    base: '/LMA-pes6-ai-studio/',
     plugins: [
       react(),
       tailwindcss(),
@@ -21,7 +21,7 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: '/Liga-Master-Argentina-PES6/',
+          id: '/LMA-pes6-ai-studio/',
           name: 'Liga Master Argentina PES6',
           short_name: 'LMA PES6',
           description:
@@ -31,8 +31,8 @@ export default defineConfig(() => {
           display: 'standalone',
           orientation: 'any',
           lang: 'es-AR',
-          start_url: '/Liga-Master-Argentina-PES6/',
-          scope: '/Liga-Master-Argentina-PES6/',
+          start_url: '/LMA-pes6-ai-studio/',
+          scope: '/LMA-pes6-ai-studio/',
           icons: [
             {
               src: 'pwa-192x192.png',

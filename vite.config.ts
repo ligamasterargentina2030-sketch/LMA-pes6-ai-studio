@@ -6,7 +6,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
-    base: '/LMA-pes6-ai-studio/',
+    base:'/LMA-pes6-ai-studio/',
     plugins: [
       react(),
       tailwindcss(),
@@ -21,9 +21,9 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: '/LMA-pes6-ai-studio/',
-          name: 'Liga Master Argentina PES6',
-          short_name: 'LMA PES6',
+          id:'/LMA-pes6-ai-studio/',
+          name:'Liga Master Argentina PES6',
+          short_name:'LMA PES6',
           description:
             'Portal oficial de Liga Master Argentina PES6 (Temporada 2026-2027) - THE DEN PATCH. Tabla de posiciones, copas, partidos, calendario y galería.',
           theme_color: '#050608',
@@ -31,7 +31,7 @@ export default defineConfig(() => {
           display: 'standalone',
           orientation: 'any',
           lang: 'es-AR',
-          start_url: '/LMA-pes6-ai-studio/',
+          start_url:'/LMA-pes6-ai-studio/',
           scope: '/LMA-pes6-ai-studio/',
           icons: [
             {
